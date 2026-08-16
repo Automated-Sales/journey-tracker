@@ -201,8 +201,8 @@ async function main() {
       process.env.PUBLIC_BASE_URL = "https://attribution.example.com/";
       const url = journeyLinkUrl(reloaded!, identityIdA);
       assert.ok(url, "journeyLinkUrl should return a URL once PUBLIC_BASE_URL is set");
-      assert.strictEqual(url!.startsWith("https://attribution.example.com/attribution/journey/identity-aaa?"), true, "trailing slash on PUBLIC_BASE_URL should be stripped, not double up");
-      assert.ok(url!.includes(`tenant=${encodeURIComponent(reloaded!.id)}`), "the link should carry the tenant id so /attribution/api/journey can resolve which secret to verify against");
+      assert.strictEqual(url!.startsWith("https://attribution.example.com/journey/identity-aaa?"), true, "trailing slash on PUBLIC_BASE_URL should be stripped, not double up, and the path should be a root /journey/... URL (no redundant /attribution prefix)");
+      assert.ok(url!.includes(`tenant=${encodeURIComponent(reloaded!.id)}`), "the link should carry the tenant id so /api/journey can resolve which secret to verify against");
       assert.ok(url!.includes(`token=${tokenA1}`), "the link's token should match what signJourneyToken produces for the same tenant+identity");
     } finally {
       if (savedBaseUrl === undefined) delete process.env.PUBLIC_BASE_URL;

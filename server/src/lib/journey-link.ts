@@ -65,5 +65,5 @@ export function journeyLinkUrl(tenant: Tenant, identityId: string): string | nul
   const base = publicBaseUrlFromEnv();
   if (!base) return null;
   const token = signJourneyToken(tenant, identityId);
-  return `${base}/attribution/journey/${identityId}?tenant=${encodeURIComponent(tenant.id)}&token=${token}`;
+  return `${base}/journey/${identityId}?tenant=${encodeURIComponent(tenant.id)}&token=${token}`;
 }

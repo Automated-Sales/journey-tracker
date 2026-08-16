@@ -2,9 +2,10 @@
 
 Everything in this project — the tracking API, the tenant-scoped
 tracking/webhook endpoints, the `/automated-sales-tracker.js` snippet, and
-the new `/attribution` portal — is one Node.js process (`server/`) serving
-plain files and JSON. No database server, no build step for most of it,
-nothing that needs anything more than a small Droplet.
+the self-serve portal (marketing page, signup, login, dashboard) — is one
+Node.js process (`server/`) serving plain files and JSON. No database
+server, no build step for most of it, nothing that needs anything more
+than a small Droplet.
 
 ## One hard constraint first
 
@@ -173,44 +174,39 @@ hostname — no certbot, no manual renewal cron job.
 
 ## 6. Getting `automated-sales.co/attribution` to actually show this
 
-The brief was to host this at **automated-sales.co/attribution** — but
-`automated-sales.co` is a Next.js app deployed on Vercel (source on
+The original brief was to host this at **automated-sales.co/attribution**
+— but `automated-sales.co` is a Next.js app deployed on Vercel (source on
 GitHub, auto-deploys on push to `main`), running on different
-infrastructure than this Droplet. Two ways to reconcile that, in order
-of how much you want to touch the main site's setup:
+infrastructure than this Droplet. That's now settled in favor of the
+simpler option: the portal lives entirely on its own dedicated subdomain,
+**attribution.automated-sales.co**, at clean root paths (`/`, `/login`,
+`/signup`, `/dashboard`, `/journey/:id`) — no `/attribution` prefix
+repeating what the subdomain already says. `src/index.ts` also keeps
+permanent redirects from the old `/attribution/*` paths, since links
+already pushed into a client's Pipedrive (the "AS: View Journey" custom
+field) have the old URL shape baked into them as plain saved text.
 
-**A. Redirect (simplest, recommended to start).** Add a `redirects()`
-rule in that repo's `next.config.ts`:
+If you ever want `automated-sales.co/attribution` itself to redirect
+through to the subdomain (rather than sending people straight to
+`attribution.automated-sales.co`), add a `redirects()` rule in the
+Next.js repo's `next.config.ts`:
 
 ```ts
 async redirects() {
   return [
-    { source: "/attribution", destination: "https://attribution.automated-sales.co/attribution", permanent: true },
-    { source: "/attribution/:path*", destination: "https://attribution.automated-sales.co/attribution/:path*", permanent: true },
+    { source: "/attribution", destination: "https://attribution.automated-sales.co", permanent: true },
+    { source: "/attribution/:path*", destination: "https://attribution.automated-sales.co/:path*", permanent: true },
   ];
 }
 ```
 
 Merge that into whatever's already exported from `next.config.ts` rather
 than replacing the file. Push to `main`, Vercel redeploys automatically.
-The portal's own pages all link to each other with paths like
-`/attribution/signup`, so once someone lands on the subdomain everything
-continues to work correctly — only the very first hop is a redirect. The
-address bar will show the subdomain after that first hop, not the exact
-`automated-sales.co/...` path.
-
-**B. Reverse-proxy path-forwarding (matches the URL exactly, more
-moving parts).** Vercel supports `rewrites()` in `next.config.ts` to
-proxy `/attribution*` straight through to this Droplet's `/attribution*`
-— the portal's routes are all already scoped under that one path prefix
-for exactly this reason. This keeps the URL bar showing
-`automated-sales.co/attribution` throughout, at the cost of Vercel
-proxying every request through to the Droplet (added latency, and the
-Droplet needs to handle traffic from Vercel's edge network, not just
-directly).
-
-Start with A; move to B later if the exact URL matters enough to justify
-the extra indirection.
+The address bar will show the subdomain after that first hop, not the
+exact `automated-sales.co/attribution` path — a path-matching reverse
+proxy (keeping the URL bar on `automated-sales.co/attribution` exactly)
+isn't an option anymore now that the two apps use different path shapes,
+so a redirect is the only reasonable route if this is ever wanted.
 
 ## 7. Backups
 

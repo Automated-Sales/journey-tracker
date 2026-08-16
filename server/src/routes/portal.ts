@@ -14,7 +14,7 @@ import {
   SESSION_TTL_MS,
 } from "../lib/auth";
 
-// Public-facing routes for the /attribution self-serve portal (marketing
+// Public-facing routes for the self-serve portal (marketing
 // page + signup + login + the aggregated client dashboard). Deliberately
 // NOT mounted under /t/:tenant — a visitor doesn't know their tenant slug
 // yet at signup time, and after login the session cookie (not a URL
@@ -104,7 +104,7 @@ async function requireSession(req: Request, res: Response, next: NextFunction) {
  * both work without it, same as the CLI path (see pipedrive-sync.ts,
  * which already no-ops cleanly when personFieldMap isn't set yet).
  */
-portalRouter.post("/attribution/api/signup", async (req, res) => {
+portalRouter.post("/api/signup", async (req, res) => {
   const form = req.body || {};
   const validationError = validateSignupForm(form);
   if (validationError) return res.status(400).json({ error: validationError });
@@ -144,7 +144,7 @@ portalRouter.post("/attribution/api/signup", async (req, res) => {
   res.status(201).json({ tenantId: tenant.id, name: tenant.name });
 });
 
-portalRouter.post("/attribution/api/login", async (req, res) => {
+portalRouter.post("/api/login", async (req, res) => {
   const email = String(req.body?.email || "")
     .trim()
     .toLowerCase();
@@ -161,14 +161,14 @@ portalRouter.post("/attribution/api/login", async (req, res) => {
   res.json({ tenantId: tenant.id, name: tenant.name });
 });
 
-portalRouter.post("/attribution/api/logout", async (req, res) => {
+portalRouter.post("/api/logout", async (req, res) => {
   const token = getSessionCookie(req);
   if (token) await db.session.delete(token);
   clearSessionCookie(res);
   res.json({ ok: true });
 });
 
-portalRouter.get("/attribution/api/me", requireSession, (req, res) => {
+portalRouter.get("/api/me", requireSession, (req, res) => {
   const tenant = req.portalTenant!;
   res.json({
     tenantId: tenant.id,
@@ -189,7 +189,7 @@ const VISIT_LOGGING_MODES = ["off", "notes", "activities"] as const;
  * current, and some reps will find that noisy. See
  * lib/pipedrive-sync.ts's logWebsiteVisit for where this setting is read.
  */
-portalRouter.post("/attribution/api/settings/visit-logging", requireSession, async (req, res) => {
+portalRouter.post("/api/settings/visit-logging", requireSession, async (req, res) => {
   const tenant = req.portalTenant!;
   const mode = req.body?.mode;
   if (!VISIT_LOGGING_MODES.includes(mode)) {
@@ -207,7 +207,7 @@ portalRouter.post("/attribution/api/settings/visit-logging", requireSession, asy
  * fetch) hits these, so auth is the same session cookie as everything
  * else in this router — no separate token needed.
  */
-portalRouter.get("/attribution/api/export/prospects.csv", requireSession, async (req, res) => {
+portalRouter.get("/api/export/prospects.csv", requireSession, async (req, res) => {
   const tenant = req.portalTenant!;
   const [identities, touchpoints] = await Promise.all([
     db.identity.findMany({ where: { tenantId: tenant.id } }),
@@ -218,7 +218,7 @@ portalRouter.get("/attribution/api/export/prospects.csv", requireSession, async 
   res.send(buildProspectsCsv(identities, touchpoints, tenant.pipedriveCompanyDomain));
 });
 
-portalRouter.get("/attribution/api/export/campaigns.csv", requireSession, async (req, res) => {
+portalRouter.get("/api/export/campaigns.csv", requireSession, async (req, res) => {
   const tenant = req.portalTenant!;
   const touchpoints = await db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } });
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -226,7 +226,7 @@ portalRouter.get("/attribution/api/export/campaigns.csv", requireSession, async 
   res.send(buildCampaignsCsv(touchpoints));
 });
 
-portalRouter.get("/attribution/api/summary", requireSession, async (req, res) => {
+portalRouter.get("/api/summary", requireSession, async (req, res) => {
   const tenant = req.portalTenant!;
   const [identities, touchpoints] = await Promise.all([
     db.identity.findMany({ where: { tenantId: tenant.id } }),
@@ -252,7 +252,7 @@ portalRouter.get("/attribution/api/summary", requireSession, async (req, res) =>
  * journey route further down, so the two timeline views (the dashboard's
  * expandable row, and the standalone journey.html page a Pipedrive field
  * links to) are always fed identical data and can share rendering code
- * (see public/attribution/timeline.js).
+ * (see public/timeline.js).
  */
 function touchpointToApiShape(tp: Touchpoint) {
   return {
@@ -282,7 +282,7 @@ function touchpointToApiShape(tp: Touchpoint) {
  * same defense-in-depth as everywhere else identityId crosses a trust
  * boundary in this app.
  */
-portalRouter.get("/attribution/api/prospects/:identityId", requireSession, async (req, res) => {
+portalRouter.get("/api/prospects/:identityId", requireSession, async (req, res) => {
   const tenant = req.portalTenant!;
   const identity = await db.identity.findUnique({ where: { tenantId: tenant.id, id: req.params.identityId } });
   if (!identity) return res.status(404).json({ error: "Not found" });
@@ -320,7 +320,7 @@ portalRouter.get("/attribution/api/prospects/:identityId", requireSession, async
  * tenantId+id), it's just carried in the query string instead of a
  * session cookie.
  */
-portalRouter.get("/attribution/api/journey/:identityId", async (req, res) => {
+portalRouter.get("/api/journey/:identityId", async (req, res) => {
   const tenantId = String(req.query.tenant || "");
   const token = typeof req.query.token === "string" ? req.query.token : undefined;
   if (!tenantId) return res.status(400).json({ error: "Missing tenant" });

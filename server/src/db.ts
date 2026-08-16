@@ -100,7 +100,7 @@ async function init() {
   ensureColumn("tenants", "signupEmail", "TEXT");
   ensureColumn("tenants", "passwordHash", "TEXT");
   // 'cli' (onboarded by npm run add-tenant) or 'self_serve' (signed up
-  // through the /attribution portal) — cosmetic, for admin visibility only.
+  // through the portal) — cosmetic, for admin visibility only.
   ensureColumn("tenants", "signupSource", "TEXT");
   // How long a visitor stayed on this touchpoint's page, in milliseconds.
   // Null until the tracking snippet reports it (fires on page/tab hide,
@@ -175,7 +175,7 @@ export interface Tenant {
   personFieldMap: Record<string, string> | null;
   dealFieldMap: Record<string, string> | null;
   // Portal login (self-serve tenants only — CLI-onboarded tenants have
-  // both null and simply can't log into /attribution/dashboard).
+  // both null and simply can't log into /dashboard).
   signupEmail: string | null;
   passwordHash: string | null;
   signupSource: "cli" | "self_serve" | null;

@@ -13,9 +13,10 @@ read that happened weeks before someone Googled the brand and signed up.
 This tool keeps the whole path, in order, attached to the record a rep
 actually opens.
 
-There's also a self-serve front door — `/attribution` (see "Self-serve
-portal" below) — for a client to connect their own Pipedrive and see an
-aggregated dashboard, without you running the CLI onboarding by hand.
+There's also a self-serve front door — the portal's root URL (see
+"Self-serve portal" below) — for a client to connect their own Pipedrive
+and see an aggregated dashboard, without you running the CLI onboarding
+by hand.
 
 ## Multi-tenant: one deployment, many clients
 
@@ -144,15 +145,20 @@ read for a rep sitting on the record.
 Ship the fields first for a new client (a token and one script) and add
 the panel whenever you're ready — they're independent and don't conflict.
 
-## Self-serve portal — `/attribution`
+## Self-serve portal
 
 A third way in, alongside the CLI (`add-tenant`, for you to onboard a
 client) and the two Pipedrive-side delivery modes above (for what a rep
 sees once onboarded): a public, branded front door where a client
 onboards *themselves*, plus a dashboard they can log into afterward.
+Lives at clean root paths on its own dedicated subdomain
+(`attribution.automated-sales.co`) — see "Deploying" below for why
+there's no `/attribution` prefix on any of these; permanent redirects
+from the old prefixed paths still work for anything already saved
+(notably the "AS: View Journey" Pipedrive custom field link).
 
-- **`/attribution`** — marketing/landing page explaining the product.
-- **`/attribution/signup`** — company name, work email, a password, and
+- **`/`** — marketing/landing page explaining the product.
+- **`/signup`** — company name, work email, a password, and
   their Pipedrive API token (found under Personal Preferences → API in
   their own Pipedrive account). The token is verified live against
   Pipedrive on submit (same call `add-tenant`'s operator would eyeball
@@ -160,7 +166,7 @@ onboards *themselves*, plus a dashboard they can log into afterward.
   tenant is created and its custom fields are set up automatically —
   the exact same logic `npm run setup:pipedrive` runs, just triggered
   automatically instead of needing that command run by hand.
-- **`/attribution/login`** and **`/attribution/dashboard`** — email +
+- **`/login`** and **`/dashboard`** — email +
   password login (a session cookie, not the trackKey/webhookSecret
   scheme the tracking snippet and webhooks use — see
   `server/src/lib/auth.ts`), then an aggregated view across *all* of that
@@ -185,17 +191,17 @@ project's design, so that groundwork isn't lost if this is picked up
 later — it just isn't implemented, since the simpler path covers today's
 need.
 
-**No dedicated frontend framework** — the portal is four static HTML
-files (`server/public/attribution/`) with vanilla JS calling the backend
+**No dedicated frontend framework** — the portal is a handful of static
+HTML files (`server/public/`) with vanilla JS calling the backend
 directly, not a React/Vite app like `panel/`. Deliberate: the panel needs
 React because it's embedded in a Pipedrive iframe via
 `@pipedrive/app-extensions-sdk`; the portal doesn't have that constraint,
-so a build step would just be overhead for four forms and some bar charts
-built out of styled `<div>`s.
+so a build step would just be overhead for a handful of forms and some
+bar charts built out of styled `<div>`s.
 
 Branding note: colors/fonts are a best-effort match to
 automated-sales.com from screenshots, not extracted hex codes — see
-`server/public/attribution/style.css`'s CSS variables at the top if you
+`server/public/style.css`'s CSS variables at the top if you
 want to swap in exact values or a logo file.
 
 ## Contact-level or deal-level? Both — but they mean different things
@@ -261,9 +267,10 @@ Client B's Pipedrive       ─┘
   registering the panel in a client's Pipedrive Developer Hub (only
   needed for the panel path, not the custom fields, and done once per
   client).
-- **`server/public/attribution/`** — the self-serve portal (marketing
-  page, signup, login, aggregated dashboard), served by the same backend
-  process at `/attribution`; see "Self-serve portal" above.
+- **`server/public/`** — also where the self-serve portal lives
+  (marketing page, signup, login, aggregated dashboard, shared
+  `timeline.js`), served by the same backend process at clean root
+  paths; see "Self-serve portal" above.
 
 ### What's been verified vs. what needs a live account
 
@@ -380,7 +387,7 @@ npm run smoke-test          # simulates two tenants' journeys end-to-end, proves
 npm run verify-attribution  # checks the custom-fields sync logic, also no Pipedrive needed
 npm run verify-portal       # checks the self-serve portal's auth/signup/dashboard logic, also no Pipedrive needed
 npm run add-tenant -- --slug test-co --name "Test Co"   # create a local test tenant
-npm run dev                 # starts the API on :8787 — visit :8787/attribution for the portal
+npm run dev                 # starts the API on :8787 — visit :8787 for the portal
 
 cd ../panel
 npm install
@@ -403,8 +410,8 @@ split that way because of the single-process database constraint below.
    SQLite file (via sql.js — pure WASM, no native build step, so it
    installs reliably on any host); see the known limitation above about
    running exactly one server process against it.
-   The `/attribution` self-serve portal is served by this same process
-   (`server/public/attribution/`) — nothing extra to deploy for it.
+   The self-serve portal is served by this same process
+   (`server/public/`) — nothing extra to deploy for it.
 2. **Panel** (`panel/`, optional, one deployment for every client):
    `VITE_API_BASE_URL=https://your-api-host npm run build`, then deploy
    `panel/dist` as a static site.
@@ -412,11 +419,12 @@ split that way because of the single-process database constraint below.
    checklist (website snippet, LinkedIn toggle, email webhook, Pipedrive
    webhook, `setup:pipedrive`, and optionally `pipedrive-app/README.md`
    for the panel). Or skip this entirely for clients who sign up
-   themselves through `/attribution/signup`.
+   themselves through the portal's `/signup`.
 
 See **`DIGITALOCEAN.md`** for a full step-by-step Droplet deployment
-(Node + pm2 + Caddy for automatic TLS, plus how to reconcile "hosted at
-automated-sales.co/attribution" with the main site living elsewhere).
+(Node + pm2 + Caddy for automatic TLS, plus how the original
+"automated-sales.co/attribution" brief settled into a dedicated
+subdomain with the main site living elsewhere).
 
 ## Data model
 
@@ -427,7 +435,7 @@ automated-sales.co/attribution" with the main site living elsewhere).
   self-serve signups only — a login email + hashed password and
   `signupSource` ('cli' or 'self_serve').
 - **Session** — one row per logged-in portal session: an opaque token
-  (the value stored in the `/attribution` login cookie), the tenant it
+  (the value stored in the portal's login cookie), the tenant it
   belongs to, and an expiry. Only used by the portal login — has nothing
   to do with the trackKey/webhookSecret scheme the tracking snippet and
   webhooks use (see `server/src/routes/tenant-middleware.ts` for that
@@ -458,7 +466,7 @@ inline comments explaining the merge order and why).
   into the tool.
 - **Ad platform API polling** (see point 4 above) — needs a specific
   client's ad account access to wire up.
-- **Portal password reset** — a client who forgets their `/attribution`
+- **Portal password reset** — a client who forgets their portal
   login password today needs you to reset it directly in the `tenants`
   table (there's no "forgot password" email flow). Worth adding once
   self-serve volume makes "email me" an unreasonable ask.

@@ -4,7 +4,7 @@ import { buildAttributionSummary } from "./attribution";
 /**
  * Aggregates across every identity for a tenant — the thing the Pipedrive
  * panel deliberately doesn't do (it's scoped to one Person/Deal record at
- * a time). This is what the /attribution/dashboard client login shows:
+ * a time). This is what the /dashboard client login shows:
  * "which channels are actually producing prospects," not "what happened
  * on this one contact."
  *

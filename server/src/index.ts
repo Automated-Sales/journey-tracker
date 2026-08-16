@@ -41,30 +41,47 @@ app.use(cors({ origin: true, credentials: true }));
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "journey-tracker", time: new Date().toISOString() }));
 
-// The self-serve portal (/attribution) — marketing page, signup, login,
-// and the aggregated client dashboard. Session-cookie authenticated, not
+// The self-serve portal — marketing page, signup, login, and the
+// aggregated client dashboard. Session-cookie authenticated, not
 // tenant-slug/key authenticated, since a visitor doesn't know their
 // tenant slug until after they've signed up. See routes/portal.ts.
 app.use(portalRouter);
 
-// Clean URLs for the portal's static pages. Registered BEFORE
-// express.static below on purpose: express.static would otherwise treat
-// public/attribution as a directory request and 301-redirect
-// /attribution -> /attribution/ before ever reaching a route registered
-// after it, which isn't the URL shape we want. The files themselves also
-// remain directly reachable (e.g. /attribution/style.css) via the static
-// middleware for CSS/JS assets.
-const attributionPage = (file: string) => (_req: express.Request, res: express.Response) =>
-  res.sendFile(path.join(__dirname, "..", "public", "attribution", file));
-app.get("/attribution", attributionPage("index.html"));
-app.get("/attribution/signup", attributionPage("signup.html"));
-app.get("/attribution/login", attributionPage("login.html"));
-app.get("/attribution/dashboard", attributionPage("dashboard.html"));
+// Clean root URLs for the portal's static pages. This app lives on its
+// own dedicated subdomain (attribution.automated-sales.co), which
+// already says "attribution" once — repeating it in every path
+// (/attribution/dashboard) was redundant, hence plain root paths here.
+// Registered BEFORE express.static below on purpose: an earlier route
+// always wins over the static middleware for the same path.
+const portalPage = (file: string) => (_req: express.Request, res: express.Response) =>
+  res.sendFile(path.join(__dirname, "..", "public", file));
+app.get("/", portalPage("index.html"));
+app.get("/signup", portalPage("signup.html"));
+app.get("/login", portalPage("login.html"));
+app.get("/dashboard", portalPage("dashboard.html"));
 // Standalone, no-login "View full journey" page — see routes/portal.ts's
-// /attribution/api/journey/:identityId and lib/journey-link.ts. Static
-// file for every prospect; the page itself reads identityId from the URL
-// path and the tenant+token from the query string client-side.
-app.get("/attribution/journey/:identityId", attributionPage("journey.html"));
+// /api/journey/:identityId and lib/journey-link.ts. Static file for
+// every prospect; the page itself reads identityId from the URL path and
+// the tenant+token from the query string client-side.
+app.get("/journey/:identityId", portalPage("journey.html"));
+
+// Backward-compat redirects for the old /attribution/* URLs (the shape
+// every page used before the subdomain move above). Not just "some old
+// bookmark" — the journey one especially is baked as literal saved text
+// into every "AS: View Journey" Pipedrive custom field pushed before
+// this change (see lib/journey-link.ts), so breaking it silently would
+// strand already-issued links sitting in a client's live Pipedrive data.
+// 301 (permanent) since these should never come back; the journey
+// redirect preserves the query string, which carries the tenant + signed
+// token the new route still needs to verify.
+app.get("/attribution", (_req, res) => res.redirect(301, "/"));
+app.get("/attribution/signup", (_req, res) => res.redirect(301, "/signup"));
+app.get("/attribution/login", (_req, res) => res.redirect(301, "/login"));
+app.get("/attribution/dashboard", (_req, res) => res.redirect(301, "/dashboard"));
+app.get("/attribution/journey/:identityId", (req, res) => {
+  const queryString = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+  res.redirect(301, `/journey/${encodeURIComponent(req.params.identityId)}${queryString}`);
+});
 
 // The tracking snippet is hosted here, once, for every client — see
 // public/automated-sales-tracker.js and tracking-snippet/README.md.

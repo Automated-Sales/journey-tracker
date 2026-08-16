@@ -18,7 +18,7 @@
  * Skips the one step this sandbox can't reach live Pipedrive for
  * (signup's token-verification call — see verify-portal.ts's doc comment)
  * by seeding the tenant directly via the DB layer instead of going
- * through POST /attribution/api/signup.
+ * through POST /api/signup.
  */
 import "dotenv/config";
 import fs from "fs";
@@ -63,14 +63,14 @@ async function run() {
   const health = await fetch(`${BASE}/health`);
   assert(health.ok, `server is reachable at ${BASE} (run \`npm run dev\` first if this fails)`);
 
-  const badLogin = await fetch(`${BASE}/attribution/api/login`, {
+  const badLogin = await fetch(`${BASE}/api/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email: fixture.email, password: "wrong-password" }),
   });
   assert(badLogin.status === 401, "login: wrong password is rejected with 401");
 
-  const login = await fetch(`${BASE}/attribution/api/login`, {
+  const login = await fetch(`${BASE}/api/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email: fixture.email, password: fixture.password }),
@@ -79,15 +79,15 @@ async function run() {
   assert(login.ok, "login: correct email/password succeeds");
   const cookie = extractCookie(login);
 
-  const meNoAuth = await fetch(`${BASE}/attribution/api/me`);
+  const meNoAuth = await fetch(`${BASE}/api/me`);
   assert(meNoAuth.status === 401, "/me: rejected with no session cookie");
 
-  const me = await fetch(`${BASE}/attribution/api/me`, { headers: { Cookie: cookie } });
+  const me = await fetch(`${BASE}/api/me`, { headers: { Cookie: cookie } });
   assert(me.ok, "/me: succeeds with a valid session cookie");
   const meBody: any = await me.json();
   assert(meBody.tenantId === fixture.tenantId, "/me: returns the correct tenant for this session");
 
-  const summary = await fetch(`${BASE}/attribution/api/summary`, { headers: { Cookie: cookie } });
+  const summary = await fetch(`${BASE}/api/summary`, { headers: { Cookie: cookie } });
   assert(summary.ok, "/summary: succeeds with a valid session cookie");
   const summaryBody: any = await summary.json();
   assert(
@@ -95,10 +95,10 @@ async function run() {
     "/summary: brand-new tenant with no touchpoints returns a well-formed, empty summary"
   );
 
-  const logout = await fetch(`${BASE}/attribution/api/logout`, { method: "POST", headers: { Cookie: cookie } });
+  const logout = await fetch(`${BASE}/api/logout`, { method: "POST", headers: { Cookie: cookie } });
   assert(logout.ok, "logout: succeeds");
 
-  const meAfterLogout = await fetch(`${BASE}/attribution/api/me`, { headers: { Cookie: cookie } });
+  const meAfterLogout = await fetch(`${BASE}/api/me`, { headers: { Cookie: cookie } });
   assert(
     meAfterLogout.status === 401,
     "/me: same cookie is rejected after logout — session actually invalidated, not just cleared client-side"
