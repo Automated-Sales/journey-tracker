@@ -1,0 +1,37 @@
+{
+  "name": "journey-tracker-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc -p .",
+    "start": "node dist/index.js",
+    "smoke-test": "ts-node src/smoke-test.ts",
+    "setup:pipedrive": "ts-node src/setup-pipedrive-fields.ts",
+    "verify-attribution": "ts-node src/verify-attribution.ts",
+    "verify-portal": "ts-node src/verify-portal.ts",
+    "verify-portal-http:seed": "ts-node src/verify-portal-http.ts --seed",
+    "verify-portal-http:run": "ts-node src/verify-portal-http.ts --run",
+    "verify-portal-http:cleanup": "ts-node src/verify-portal-http.ts --cleanup",
+    "add-tenant": "ts-node src/add-tenant.ts",
+    "list-tenants": "ts-node src/list-tenants.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0",
+    "sql.js": "^1.14.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.10",
+    "@types/node-fetch": "^2.6.11",
+    "@types/sql.js": "^1.4.11",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "_comment": "Reference only — Pipedrive Custom UI Extensions are configured via the Developer Hub UI (App Extensions tab), not by uploading this file. Use this as the checklist of values to enter there. See README.md in this folder for the click-by-click steps. This is registered ONCE PER CLIENT — each client business has its own Pipedrive account, so each gets its own private-app registration, but all of them point at the SAME shared panel deployment, distinguished only by the ?tenant=<slug> query param on the iframe URL.",
+  "app": {
+    "name": "Prospect Journey",
+    "type": "private"
+  },
+  "extensions": [
+    {
+      "type": "custom_ui",
+      "subtype": "panel",
+      "name": "Prospect Journey",
+      "placement": "person-detail-panel",
+      "iframeUrl": "https://REPLACE-WITH-YOUR-DEPLOYED-PANEL-URL/?tenant=REPLACE-WITH-THIS-CLIENTS-SLUG",
+      "notes": "Reads window.location query param `selectedIds` as the Pipedrive Person ID, and `tenant` as which client's data to load (see panel/src/api.ts)."
+    },
+    {
+      "type": "custom_ui",
+      "subtype": "panel",
+      "name": "Prospect Journey",
+      "placement": "deal-detail-panel",
+      "iframeUrl": "https://REPLACE-WITH-YOUR-DEPLOYED-PANEL-URL/?tenant=REPLACE-WITH-THIS-CLIENTS-SLUG",
+      "notes": "Reads window.location query param `selectedIds` as the Pipedrive Deal ID; backend resolves the linked Person server-side via GET /t/:tenant/api/journey/by-deal/:dealId."
+    }
+  ],
+  "webhooks": {
+    "note": "Don't hand-fill this — run `npm run add-tenant` for this client and copy the exact URL it prints (includes their tenant slug and their own generated webhookSecret).",
+    "url": "https://REPLACE-WITH-YOUR-DEPLOYED-API-URL/t/REPLACE-WITH-THIS-CLIENTS-SLUG/webhooks/pipedrive?secret=REPLACE-WITH-THIS-TENANTS-WEBHOOK-SECRET",
+    "subscribe_to": ["person.create", "person.change", "deal.change", "activity.create", "note.create"]
+  }
+}

@@ -1,0 +1,34 @@
+<!--
+  Automated Sales — Prospect Journey Tracker
+  GTM install, Option A: Custom HTML tag (recommended default)
+  ------------------------------------------------------------
+  This is plain HTML/JS inside GTM's built-in "Custom HTML" tag type —
+  no import, no review, nothing that can fail to load. Every value GTM
+  supports in a Custom HTML tag is supported here.
+
+  Setup (2 minutes):
+    1. GTM > Tags > New > Tag Configuration > Custom HTML
+    2. Paste this whole block into the HTML field
+    3. Replace the two placeholder values below with the ones printed
+       by `npm run add-tenant` for this client (look for section "1.
+       WEBSITE" in that output)
+    4. Triggering: "All Pages" (the default trigger covers this — no
+       extra configuration needed)
+    5. Save, then Submit/Publish the container as usual
+
+  That's it — every page the container fires on will now load the
+  tracker, and forms with an email field are picked up automatically.
+-->
+<script>
+  window.AS_TRACKER_API_URL = "REPLACE_WITH_AS_TRACKER_API_URL"; // e.g. https://journey-api.yourdomain.com/t/acme-co
+  window.AS_TRACKER_KEY = "REPLACE_WITH_AS_TRACKER_KEY";
+</script>
+<script src="REPLACE_WITH_SCRIPT_HOST/automated-sales-tracker.js"></script>
+
+<!--
+  Anything that doesn't fire a native HTML form submit event (Calendly,
+  Typeform, a custom JS widget) needs one manual call on success:
+    window.ASTracker.identify(email)
+  See the root README's "Installing the snippet" section for where to
+  put that call for common tools.
+-->

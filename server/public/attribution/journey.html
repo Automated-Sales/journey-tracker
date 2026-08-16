@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Prospect journey | Automated Sales</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/attribution/style.css" />
+<link rel="icon" type="image/png" sizes="32x32" href="/attribution/assets/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="64x64" href="/attribution/assets/favicon-64.png" />
+<script src="/attribution/timeline.js"></script>
+</head>
+<body>
+
+<!--
+  Standalone, no-login "View full journey" page — what the "AS: View
+  Journey" custom field on a Pipedrive Person/Deal links to (see
+  lib/pipedrive-sync.ts). Deliberately outside the /attribution portal's
+  session-cookie auth: a rep clicking this from inside Pipedrive isn't
+  necessarily logged into the separate self-serve dashboard, and this is
+  meant to be a single click, not a login prompt. Instead it's guarded by
+  a per-identity signed token in the URL — see lib/journey-link.ts and
+  routes/portal.ts's /attribution/api/journey/:identityId. This is an
+  interim stand-in for a real Pipedrive Custom UI Extension (an actual
+  in-app popup, which is a separate, bigger project) — see the "Sync
+  attribution back to Pipedrive" card on the dashboard.
+-->
+
+<header class="as-dash-header">
+  <a class="as-logo" href="/attribution"><img class="as-logo-mark" src="/attribution/assets/logo-mark.png" alt="Automated Sales logo" /> Automated Sales</a>
+</header>
+
+<div class="as-dash-body">
+  <div id="loading" style="color:var(--as-body);">Loading…</div>
+
+  <div id="error-state" style="display:none;">
+    <div class="as-card">
+      <h3 style="margin:0 0 6px; font-size:17px; font-weight:800;">Couldn't load this journey</h3>
+      <p id="error-message" style="color:var(--as-body); margin:0;">This link may be invalid.</p>
+    </div>
+  </div>
+
+  <div id="content" style="display:none;">
+    <div class="as-card" style="margin-bottom:20px;">
+      <h2 id="contact-name" style="font-size:22px; font-weight:800; margin:0 0 8px;"></h2>
+      <p id="pipedrive-link-wrap" style="margin:0; font-size:14px;"></p>
+    </div>
+    <div class="as-card">
+      <h3 style="font-size:17px; font-weight:800; margin:0 0 16px;">Full journey</h3>
+      <div id="timeline"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // The page itself is one static file for every prospect — identityId
+  // comes from the URL path, tenant + token are passed straight through
+  // as the query string to the JSON API below (same params, unchanged).
+  var identityId = location.pathname.split('/').filter(Boolean).pop();
+  var apiUrl = '/attribution/api/journey/' + encodeURIComponent(identityId) + location.search;
+
+  fetch(apiUrl)
+    .then(function (r) {
+      if (!r.ok) {
+        var err = new Error('request failed');
+        err.status = r.status;
+        throw err;
+      }
+      return r.json();
+    })
+    .then(function (data) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('content').style.display = 'block';
+      document.getElementById('contact-name').textContent = data.identity.email || '(anonymous)';
+
+      var linkWrap = document.getElementById('pipedrive-link-wrap');
+      linkWrap.innerHTML = data.identity.pipedriveUrl
+        ? '<a class="as-pd-link" href="' + esc(data.identity.pipedriveUrl) + '" target="_blank" rel="noopener">View in Pipedrive ↗</a>'
+        : '';
+
+      renderTimeline(document.getElementById('timeline'), data.touchpoints);
+    })
+    .catch(function (err) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('error-state').style.display = 'block';
+      var message = document.getElementById('error-message');
+      if (err && err.status === 403) {
+        message.textContent = 'This link is invalid.';
+      } else if (err && err.status === 404) {
+        message.textContent = 'This contact could not be found — it may have been removed.';
+      } else {
+        message.textContent = 'Could not reach the server — please try again.';
+      }
+    });
+</script>
+
+</body>
+</html>

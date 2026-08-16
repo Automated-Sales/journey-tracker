@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dashboard | Automated Sales</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/attribution/style.css" />
+<link rel="icon" type="image/png" sizes="32x32" href="/attribution/assets/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="64x64" href="/attribution/assets/favicon-64.png" />
+<script src="/attribution/timeline.js"></script>
+</head>
+<body>
+
+<header class="as-dash-header">
+  <a class="as-logo" href="/attribution"><img class="as-logo-mark" src="/attribution/assets/logo-mark.png" alt="Automated Sales logo" /> Automated Sales</a>
+  <div class="as-nav-actions">
+    <span id="tenant-name" style="color:var(--as-body); font-size:14px; font-weight:600;"></span>
+    <button class="as-btn as-btn-outline" id="logout-btn">Log out</button>
+  </div>
+</header>
+
+<div class="as-dash-body">
+  <h2 style="font-size:24px; font-weight:800; margin: 4px 0 24px;">Attribution overview</h2>
+
+  <div id="loading" style="color:var(--as-body);">Loading…</div>
+  <div id="content" style="display:none;">
+
+    <div class="as-card as-install-card" id="install-card">
+      <div class="as-install-head" id="install-toggle">
+        <div>
+          <h3>Install tracking</h3>
+          <p id="install-sub">Add this to your site once and every page — and every form submission — gets tracked automatically.</p>
+        </div>
+        <span class="as-install-toggle" id="install-toggle-label">Hide</span>
+      </div>
+      <div class="as-install-body">
+        <div class="as-tabs">
+          <button class="as-tab-btn active" data-tab="snippet">Add the snippet directly</button>
+          <button class="as-tab-btn" data-tab="wordpress">WordPress</button>
+          <button class="as-tab-btn" data-tab="gtm">Google Tag Manager</button>
+        </div>
+
+        <div class="as-tab-panel active" data-tab="snippet">
+          <ol>
+            <li>Copy the code below.</li>
+            <li>Paste it once, anywhere in the <code>&lt;head&gt;</code> of your site template (or right before <code>&lt;/body&gt;</code>) — most site builders and themes have one shared header/footer include, so adding it there covers every page automatically. You don't need to repeat this per page.</li>
+            <li>That's it. Pageviews start flowing in immediately, and any form on the page with an email field is picked up automatically — no extra code needed for most contact/WordPress/Webflow forms.</li>
+          </ol>
+          <div class="as-code-block" id="snippet-code"><button class="as-copy-btn" data-copy-target="snippet-code-text">Copy</button><span id="snippet-code-text"></span></div>
+        </div>
+
+        <div class="as-tab-panel" data-tab="wordpress">
+          <ol>
+            <li><a href="#" id="wp-plugin-link" download>Download the WordPress plugin</a> and upload it under <strong>Plugins &gt; Add New &gt; Upload Plugin</strong>, then activate it.</li>
+            <li>Go to <strong>Settings &gt; Automated Sales Tracker</strong> and paste in the three values below.</li>
+            <li>Save. The plugin loads the snippet on every page of your site for you — nothing else to install per page.</li>
+          </ol>
+          <div class="as-kv"><span class="k">API URL</span><span class="v" id="kv-api-url"></span></div>
+          <div class="as-kv"><span class="k">Track key</span><span class="v" id="kv-track-key"></span></div>
+          <div class="as-kv"><span class="k">Script URL</span><span class="v" id="kv-script-url"></span></div>
+        </div>
+
+        <div class="as-tab-panel" data-tab="gtm">
+          <ol>
+            <li>In GTM: <strong>Tags &gt; New &gt; Tag Configuration &gt; Custom HTML</strong>.</li>
+            <li>Paste the same code from the "Add the snippet directly" tab into the HTML field.</li>
+            <li>Trigger: <strong>All Pages</strong> (the default trigger already covers this).</li>
+            <li>Save, then Submit/Publish the container. Because the trigger is "All Pages," this also only needs doing once — GTM handles firing it on every page for you.</li>
+          </ol>
+        </div>
+
+        <p style="color:var(--as-body); font-size:13px; margin-top:16px; padding-top:16px; border-top:1px solid var(--as-border);">
+          <strong>Does this survive multi-page visits?</strong> Yes — the first time someone lands on your site (e.g. from a paid ad), the snippet sets a first-party cookie that persists for a year. As they click around and eventually submit a form on a later page, that submission is linked back to the entire visit history under that cookie, ad click IDs and UTM params included — not just the page the form was on.
+        </p>
+      </div>
+    </div>
+
+    <div class="as-card as-install-card" style="margin-bottom:28px;">
+      <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Sync attribution back to Pipedrive</h3>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
+        Tracking and this dashboard work on their own, but writing the journey onto a Person or Deal's custom fields in Pipedrive needs one more thing: a webhook, so Pipedrive tells us the moment a Person or Deal exists.
+      </p>
+      <p style="background:#fdf6e8; border:1px solid #f0dfae; color:#7a5c12; border-radius:10px; padding:12px 14px; font-size:13px; margin:0 0 16px;">
+        <strong>Important:</strong> this doesn't create Person or Deal records in Pipedrive — it only enriches ones that already exist. Your website's own contact form (or however leads reach you) still needs to create the Pipedrive Person itself; this just fills in where they came from once it does.
+      </p>
+      <ol style="margin:0 0 16px; padding-left:20px; font-size:14px; line-height:1.7;">
+        <li>In Pipedrive: <strong>Settings &gt; Tools and apps &gt; Webhooks</strong> &gt; Create new webhook.</li>
+        <li>Event action: <strong>*</strong> (all). Event object: <strong>Person</strong> — add a second webhook for <strong>Deal</strong> too if you want deal-level attribution snapshots, and a third for <strong>Activity</strong> if you'd like completed sales activities (calls, meetings, tasks marked done) to show up in each prospect's timeline.</li>
+        <li>Paste the URL below as the endpoint. No separate auth needed — the secret's already in the URL.</li>
+      </ol>
+      <div class="as-code-block" id="webhook-code" style="word-break:break-all;"><button class="as-copy-btn" data-copy-target="webhook-code-text">Copy</button><span id="webhook-code-text"></span></div>
+    </div>
+
+    <div class="as-card as-install-card" style="margin-bottom:28px;">
+      <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Log website visits to Pipedrive</h3>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
+        Separate from the fields above (which keep a handful of summary fields current): this adds a record of each individual page visit — which page, how long they spent — onto the Person as they happen, once someone's identified in Pipedrive. Off by default since some reps find a per-visit feed noisy; turn it on if you'd like to see it.
+      </p>
+      <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <select id="visit-logging-select" class="as-select">
+          <option value="off">Off</option>
+          <option value="notes">Log as Notes</option>
+          <option value="activities">Log as Activities</option>
+        </select>
+        <button class="as-btn as-btn-primary" id="visit-logging-save">Save</button>
+        <span id="visit-logging-status" style="font-size:13px; color:var(--as-body);"></span>
+      </div>
+      <p style="color:var(--as-body); font-size:12.5px; margin:12px 0 0;">
+        Only visits of 3 seconds or longer are logged, to keep this useful rather than noisy. Deals only get tagged when a contact has exactly one open deal, to avoid guessing which one a visit relates to.
+      </p>
+    </div>
+
+    <div class="as-card as-install-card" style="margin-bottom:28px;">
+      <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Tracking social traffic</h3>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 12px;">
+        <strong>Paid social</strong> (Facebook/Instagram Ads, LinkedIn Ads, etc.) works the same way as Google/Bing Ads: add UTM parameters to the ad's destination URL in the ad platform itself (e.g. <code>?utm_source=facebook&amp;utm_medium=cpc&amp;utm_campaign=...</code>). Facebook and Instagram click IDs (<code>fbclid</code>) are also captured automatically when the platform appends one, the same way <code>gclid</code> is for Google Ads.
+      </p>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 12px;">
+        <strong>Organic social</strong> (someone clicks a link in a LinkedIn/Facebook/Instagram/X/TikTok post, with no ad or UTM involved) is detected automatically from the referring site and shown as its own "Organic social" channel — no setup needed. The one thing worth knowing: several platforms' in-app browsers (particularly Facebook, Instagram, and TikTok on mobile) strip the referrer for privacy, so a real organic-social click can occasionally show up as generic website traffic instead. For guaranteed accuracy — especially for a bio link or a post you'll want reliable numbers on — add UTM parameters to that link too (e.g. <code>?utm_source=linkedin&amp;utm_medium=social&amp;utm_campaign=launch-post</code>), the same as you would for an email link.
+      </p>
+    </div>
+
+    <div class="as-stat-grid">
+      <div class="as-stat-card">
+        <div class="num" id="stat-identities">–</div>
+        <div class="label">Identified prospects</div>
+      </div>
+      <div class="as-stat-card">
+        <div class="num" id="stat-touchpoints">–</div>
+        <div class="label">Touchpoints captured</div>
+      </div>
+      <div class="as-stat-card">
+        <div class="num" id="stat-total">–</div>
+        <div class="label">Total tracked visitors/contacts</div>
+      </div>
+    </div>
+
+    <div class="as-panels">
+      <div class="as-card">
+        <p class="as-panel-title">First-touch channel</p>
+        <div id="first-touch-bars"></div>
+      </div>
+      <div class="as-card">
+        <p class="as-panel-title">Last-touch channel</p>
+        <div id="last-touch-bars"></div>
+      </div>
+    </div>
+
+    <div class="as-card" style="margin-bottom:20px;">
+      <div class="as-panel-head">
+        <p class="as-panel-title">Top campaigns</p>
+        <a class="as-export-link" href="/attribution/api/export/campaigns.csv">Download CSV</a>
+      </div>
+      <div id="campaigns-table"></div>
+    </div>
+
+    <div class="as-card">
+      <div class="as-panel-head">
+        <p class="as-panel-title">Recently active prospects</p>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="as-export-link" id="recent-columns-btn">Columns</button>
+          <a class="as-export-link" href="/attribution/api/export/prospects.csv">Download CSV</a>
+        </div>
+      </div>
+      <div id="recent-columns-panel" class="as-columns-panel" style="display:none;"></div>
+      <div id="recent-table"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  // esc, CHANNEL_META(_BY_LABEL), metaFor(Label), channelBadge,
+  // describeTouchpoint(Html), referrerDomain, utmDetail, clickIdSummary,
+  // formatDuration/Date, sumDurations, groupTouchpoints, timelineBodyHtml,
+  // and renderTimeline all now live in timeline.js (loaded in <head>
+  // above) — shared with journey.html's standalone "View full journey"
+  // page (the one a Pipedrive custom field links to) so both render a
+  // prospect's history identically instead of drifting apart.
+
+  function renderBars(container, rows) {
+    if (!rows.length) {
+      container.innerHTML = '<div class="as-empty">No data yet — tracking will populate this once visitors are identified.</div>';
+      return;
+    }
+    const max = Math.max(...rows.map((r) => r.count));
+    container.innerHTML = rows
+      .map(
+        (r) => `
+      <div class="as-bar-row">
+        <div class="as-bar-label" title="${esc(r.channel)}">${esc(r.channel)}</div>
+        <div class="as-bar-track"><div class="as-bar-fill" style="width:${Math.max(4, (r.count / max) * 100)}%"></div></div>
+        <div class="as-bar-count">${r.count}</div>
+      </div>`
+      )
+      .join('');
+  }
+
+  function renderCampaigns(container, rows) {
+    if (!rows.length) {
+      container.innerHTML = '<div class="as-empty">No campaign data yet.</div>';
+      return;
+    }
+    container.innerHTML = `<table class="as-table"><thead><tr><th>Campaign</th><th>Touchpoints</th></tr></thead><tbody>${rows
+      .map((r) => `<tr><td>${esc(r.campaign)}</td><td>${r.count}</td></tr>`)
+      .join('')}</tbody></table>`;
+  }
+
+  var prospectCache = {};
+
+  function toggleProspectRow(row, identityId) {
+    var expanded = row.classList.contains('expanded');
+    var existingDetail = row.nextElementSibling;
+    if (existingDetail && existingDetail.classList.contains('as-detail-row')) {
+      existingDetail.remove();
+      row.classList.remove('expanded');
+      return;
+    }
+    row.classList.add('expanded');
+    var colCount = row.children.length;
+    var detailRow = document.createElement('tr');
+    detailRow.className = 'as-detail-row';
+    detailRow.innerHTML = '<td colspan="' + colCount + '"><div class="as-timeline-wrap"><div class="as-timeline-loading">Loading history…</div></div></td>';
+    row.parentNode.insertBefore(detailRow, row.nextSibling);
+
+    var wrap = detailRow.querySelector('.as-timeline-wrap');
+    if (prospectCache[identityId]) {
+      renderTimeline(wrap, prospectCache[identityId]);
+      return;
+    }
+    fetch('/attribution/api/prospects/' + encodeURIComponent(identityId), { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('failed')); })
+      .then(function (data) {
+        prospectCache[identityId] = data.touchpoints;
+        renderTimeline(wrap, data.touchpoints);
+      })
+      .catch(function () {
+        wrap.innerHTML = '<div class="as-timeline-empty">Couldn’t load this contact’s history — try again.</div>';
+      });
+  }
+
+  // Blank/empty cell, styled to match the existing "—" used for a missing
+  // Referrer/Pipedrive link — same convention, just for a plain text value
+  // rather than a link.
+  function cellOrDash(value) {
+    return value ? esc(value) : '<span class="as-pd-none">—</span>';
+  }
+
+  // Same, but for a milestone count where 0 is a real, meaningful value
+  // (e.g. a Deal created with zero prior touchpoints) rather than
+  // "nothing to show" — cellOrDash's truthiness check would wrongly
+  // render 0 as a dash, same class of bug as PHP's `empty()` on "0".
+  // Only null/undefined (milestone not reached yet) should dash out.
+  function numOrDash(value) {
+    return value === null || value === undefined ? '<span class="as-pd-none">—</span>' : esc(value);
+  }
+
+  // One entry per column in the Recently active prospects table — the
+  // single source of truth for both rendering the table (renderRecent)
+  // and the show/hide + reorder UI (renderColumnsPanel). Array order here
+  // is the DEFAULT column order (used on first load and after "Reset to
+  // default") — 'pipedrive' leads deliberately, since that's the record a
+  // rep actually needs to click through to. 'contact' can't be hidden
+  // (alwaysVisible: true) since it's the row's only identifying label,
+  // but — unlike the very first version of this feature — it's no longer
+  // hard-locked to position 0: it can be dragged anywhere, same as every
+  // other column, since the whole row (not just this cell) is the
+  // expand/collapse click target.
+  var RECENT_COLUMNS = [
+    {
+      key: 'pipedrive',
+      label: 'Pipedrive',
+      render: function (r) {
+        return r.pipedriveUrl
+          ? '<a class="as-pd-link" href="' + esc(r.pipedriveUrl) + '" target="_blank" rel="noopener">#' + esc(r.pipedrivePersonId) + ' ↗</a>'
+          : '<span class="as-pd-none">—</span>';
+      },
+    },
+    {
+      key: 'contact',
+      label: 'Contact',
+      alwaysVisible: true,
+      render: function (r) {
+        var label = r.email || '(anonymous)';
+        return '<span class="as-contact-cell"><span class="as-row-chevron">▸</span><span title="' + esc(label) + '">' + esc(label) + '</span></span>';
+      },
+    },
+    { key: 'firstTouch', label: 'First touch', render: function (r) { return channelBadge(r.firstTouchChannel); } },
+    {
+      key: 'source',
+      label: 'Source',
+      render: function (r) { return cellOrDash(r.firstTouchSource === 'website' ? null : r.firstTouchSource); },
+    },
+    { key: 'medium', label: 'Medium', render: function (r) { return cellOrDash(r.firstTouchMedium); } },
+    { key: 'campaign', label: 'Campaign', render: function (r) { return cellOrDash(r.firstTouchCampaign); } },
+    { key: 'term', label: 'Term', render: function (r) { return cellOrDash(r.firstTouchTerm); } },
+    { key: 'content', label: 'Content', render: function (r) { return cellOrDash(r.firstTouchContent); } },
+    {
+      key: 'referrer',
+      label: 'Referrer',
+      render: function (r) {
+        var domain = referrerDomain(r.firstTouchReferrer);
+        return domain
+          ? '<a class="as-referrer-link" href="' + esc(r.firstTouchReferrer) + '" target="_blank" rel="noopener" title="' + esc(r.firstTouchReferrer) + '">' + esc(domain) + '</a>'
+          : '<span class="as-pd-none">—</span>';
+      },
+    },
+    { key: 'lastTouch', label: 'Last touch', render: function (r) { return channelBadge(r.lastTouchChannel); } },
+    { key: 'totalTouchpoints', label: 'Total touchpoints', render: function (r) { return esc(r.touchpointCount); } },
+    {
+      key: 'leadToDeal',
+      label: 'Touchpoints: Lead → Deal',
+      headerTitle: "Touchpoints from first touch up to and including this contact's Deal being created in Pipedrive",
+      render: function (r) { return numOrDash(r.leadToDealTouchpoints); },
+    },
+    {
+      key: 'dealToWon',
+      label: 'Touchpoints: Deal → Won',
+      headerTitle: "Touchpoints between this contact's Deal being created and it being marked Won in Pipedrive",
+      render: function (r) { return numOrDash(r.dealToWonTouchpoints); },
+    },
+    { key: 'lastSeen', label: 'Last seen', render: function (r) { return esc(new Date(r.lastSeenAt).toLocaleDateString()); } },
+  ];
+  var RECENT_COLUMNS_BY_KEY = RECENT_COLUMNS.reduce(function (acc, c) {
+    acc[c.key] = c;
+    return acc;
+  }, {});
+
+  // Persisted per-browser (not per-account — this is a local display
+  // preference, not data) via localStorage, which is the right tool here:
+  // dashboard.html is a real page served from this tenant's own server,
+  // not a claude.ai artifact sandbox, so normal browser storage APIs are
+  // available and appropriate. Versioned key so a future change to the
+  // column set can be introduced with a clean slate if it ever needs one.
+  var RECENT_COLUMN_PREFS_KEY = 'as_dashboard_recent_columns_v1';
+
+  function loadColumnPrefs() {
+    var allKeys = RECENT_COLUMNS.map(function (c) { return c.key; });
+    var saved = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(RECENT_COLUMN_PREFS_KEY) || 'null');
+    } catch (e) {
+      saved = null; // corrupt/foreign value in that key — fall back to defaults rather than throw
+    }
+    var order = (saved && Array.isArray(saved.order) ? saved.order : []).filter(function (k) {
+      return allKeys.indexOf(k) !== -1; // drop any stale key from a since-removed/renamed column
+    });
+    // Any column not in the saved order (either first-ever load, or a
+    // column added in a later update) lands at the end in RECENT_COLUMNS'
+    // own array order — which is also, on a completely fresh load with no
+    // saved order at all, simply the full default order (Pipedrive first).
+    allKeys.forEach(function (k) {
+      if (order.indexOf(k) === -1) order.push(k);
+    });
+    var hidden = (saved && Array.isArray(saved.hidden) ? saved.hidden : []).filter(function (k) {
+      var col = RECENT_COLUMNS_BY_KEY[k];
+      return !!col && !col.alwaysVisible; // e.g. 'contact' can never end up hidden, even from stale/tampered saved state
+    });
+    return { order: order, hidden: hidden };
+  }
+
+  function saveColumnPrefs(prefs) {
+    try {
+      localStorage.setItem(RECENT_COLUMN_PREFS_KEY, JSON.stringify(prefs));
+    } catch (e) {
+      // Private browsing / storage disabled / quota exceeded — the
+      // preference just won't persist across reloads, which is a fine
+      // degradation for a display-only setting.
+    }
+  }
+
+  var recentColumnPrefs = loadColumnPrefs();
+  var lastRecentRows = []; // cached so a column-pref change can re-render without refetching
+
+  function renderRecent(container, rows) {
+    lastRecentRows = rows;
+    if (!rows.length) {
+      container.innerHTML = '<div class="as-empty">No prospects identified yet.</div>';
+      return;
+    }
+    var visibleColumns = recentColumnPrefs.order
+      .filter(function (k) { return recentColumnPrefs.hidden.indexOf(k) === -1; })
+      .map(function (k) { return RECENT_COLUMNS_BY_KEY[k]; })
+      .filter(Boolean);
+
+    var theadHtml = visibleColumns
+      .map(function (c) {
+        return '<th' + (c.headerTitle ? ' title="' + esc(c.headerTitle) + '"' : '') + '>' + esc(c.label) + '</th>';
+      })
+      .join('');
+
+    // Wrapped in as-table-scroll: with every column visible this table is
+    // wider than most screens — horizontal scroll beats squeezing
+    // everything down to unreadable widths. The Columns button (see
+    // renderColumnsPanel) lets a visitor hide the ones they don't care
+    // about instead.
+    var bodyHtml = rows
+      .map(function (r) {
+        var cells = visibleColumns.map(function (c) { return '<td>' + c.render(r) + '</td>'; }).join('');
+        return '<tr class="as-row-clickable" data-identity-id="' + esc(r.identityId) + '">' + cells + '</tr>';
+      })
+      .join('');
+
+    container.innerHTML =
+      '<div class="as-table-scroll"><table class="as-table"><thead><tr>' +
+      theadHtml +
+      '</tr></thead><tbody>' +
+      bodyHtml +
+      '</tbody></table></div>';
+
+    container.querySelectorAll('tr.as-row-clickable').forEach(function (row) {
+      row.addEventListener('click', function () {
+        toggleProspectRow(row, row.getAttribute('data-identity-id'));
+      });
+    });
+    // The Pipedrive/referrer links live inside a clickable row — without
+    // this, a click on either would also bubble up and toggle the
+    // timeline open or closed at the same time as opening a new tab.
+    container.querySelectorAll('a.as-pd-link, a.as-referrer-link').forEach(function (link) {
+      link.addEventListener('click', function (event) {
+        event.stopPropagation();
+      });
+    });
+  }
+
+  // The show/hide + reorder control living in #recent-columns-panel,
+  // toggled open by the "Columns" button next to Download CSV. Reorder
+  // uses up/down buttons rather than drag-and-drop — no extra library,
+  // and it works the same with a mouse, keyboard, or touch, which
+  // drag-and-drop reordering built from scratch usually doesn't without
+  // real effort.
+  function renderColumnsPanel(container) {
+    var order = recentColumnPrefs.order;
+    var rowsHtml = order
+      .map(function (key, i) {
+        var col = RECENT_COLUMNS_BY_KEY[key];
+        if (!col) return '';
+        var checked = recentColumnPrefs.hidden.indexOf(key) === -1;
+        // alwaysVisible columns (just 'contact') still get a checkbox —
+        // consistent with every other row — but it's disabled and forced
+        // checked, with a title explaining why, rather than omitted
+        // entirely. That keeps the reorder arrows available for it too:
+        // it can move anywhere in the list, it just can't be unchecked.
+        var lockedAttrs = col.alwaysVisible ? ' disabled title="Always shown — this column can\'t be hidden"' : '';
+        return (
+          '<div class="as-columns-row" data-key="' + esc(key) + '">' +
+          '<label class="as-columns-check"><input type="checkbox" data-key="' + esc(key) + '"' + (checked ? ' checked' : '') + lockedAttrs + ' /> ' + esc(col.label) + '</label>' +
+          '<span class="as-columns-move">' +
+          '<button type="button" class="as-columns-move-btn" data-key="' + esc(key) + '" data-dir="up"' + (i === 0 ? ' disabled' : '') + ' title="Move up">↑</button>' +
+          '<button type="button" class="as-columns-move-btn" data-key="' + esc(key) + '" data-dir="down"' + (i === order.length - 1 ? ' disabled' : '') + ' title="Move down">↓</button>' +
+          '</span>' +
+          '</div>'
+        );
+      })
+      .join('');
+
+    container.innerHTML =
+      '<p class="as-columns-hint">Check a column to show it, use the arrows to reorder — saved to this browser. Contact can\'t be hidden.</p>' +
+      '<div class="as-columns-list">' +
+      rowsHtml +
+      '</div>' +
+      '<button type="button" class="as-btn-text as-columns-reset" id="recent-columns-reset">Reset to default</button>';
+
+    container.querySelectorAll('input[type="checkbox"][data-key]').forEach(function (input) {
+      if (input.disabled) return; // alwaysVisible column — nothing to toggle
+      input.addEventListener('change', function () {
+        var key = input.getAttribute('data-key');
+        var idx = recentColumnPrefs.hidden.indexOf(key);
+        if (input.checked && idx !== -1) recentColumnPrefs.hidden.splice(idx, 1);
+        if (!input.checked && idx === -1) recentColumnPrefs.hidden.push(key);
+        saveColumnPrefs(recentColumnPrefs);
+        renderRecent(document.getElementById('recent-table'), lastRecentRows);
+      });
+    });
+
+    container.querySelectorAll('.as-columns-move-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var key = btn.getAttribute('data-key');
+        var dir = btn.getAttribute('data-dir');
+        var order = recentColumnPrefs.order;
+        var from = order.indexOf(key);
+        var to = dir === 'up' ? from - 1 : from + 1;
+        if (to < 0 || to >= order.length) return;
+        var tmp = order[to];
+        order[to] = order[from];
+        order[from] = tmp;
+        saveColumnPrefs(recentColumnPrefs);
+        renderColumnsPanel(container);
+        renderRecent(document.getElementById('recent-table'), lastRecentRows);
+      });
+    });
+
+    document.getElementById('recent-columns-reset').addEventListener('click', function () {
+      try {
+        localStorage.removeItem(RECENT_COLUMN_PREFS_KEY);
+      } catch (e) {}
+      recentColumnPrefs = loadColumnPrefs();
+      renderColumnsPanel(container);
+      renderRecent(document.getElementById('recent-table'), lastRecentRows);
+    });
+  }
+
+  function renderInstall(install, hasData) {
+    document.getElementById('snippet-code-text').textContent = install.snippet;
+    document.getElementById('kv-api-url').textContent = install.apiUrl;
+    document.getElementById('kv-track-key').textContent = install.trackKey;
+    document.getElementById('kv-script-url').textContent = install.scriptSrc;
+    document.getElementById('webhook-code-text').textContent = install.pipedriveWebhookUrl;
+    var wpLink = document.getElementById('wp-plugin-link');
+    wpLink.href = install.wordpressPluginUrl;
+
+    var card = document.getElementById('install-card');
+    var toggleLabel = document.getElementById('install-toggle-label');
+    var sub = document.getElementById('install-sub');
+    function setCollapsed(collapsed) {
+      card.classList.toggle('collapsed', collapsed);
+      toggleLabel.textContent = collapsed ? 'Show' : 'Hide';
+    }
+    // Once tracking data is flowing, collapse this by default (it's no
+    // longer the first thing a returning user needs) but keep it one
+    // click away — installing on a second site, or double-checking the
+    // key, are still common asks.
+    if (hasData) {
+      sub.textContent = 'Tracking is live. Reopen this if you need to add tracking to another site, or double-check your key.';
+      setCollapsed(true);
+    } else {
+      setCollapsed(false);
+    }
+    document.getElementById('install-toggle').addEventListener('click', function () {
+      setCollapsed(!card.classList.contains('collapsed'));
+    });
+
+    document.querySelectorAll('.as-tab-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var tab = btn.getAttribute('data-tab');
+        document.querySelectorAll('.as-tab-btn').forEach(function (b) { b.classList.toggle('active', b === btn); });
+        document.querySelectorAll('.as-tab-panel').forEach(function (p) {
+          p.classList.toggle('active', p.getAttribute('data-tab') === tab);
+        });
+      });
+    });
+
+    document.querySelectorAll('.as-copy-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var text = document.getElementById(btn.getAttribute('data-copy-target')).textContent;
+        navigator.clipboard.writeText(text).then(function () {
+          var original = btn.textContent;
+          btn.textContent = 'Copied!';
+          setTimeout(function () { btn.textContent = original; }, 1500);
+        });
+      });
+    });
+  }
+
+  function renderVisitLogging(me) {
+    var select = document.getElementById('visit-logging-select');
+    var status = document.getElementById('visit-logging-status');
+    select.value = me.pipedriveVisitLogging || 'off';
+
+    document.getElementById('visit-logging-save').addEventListener('click', function () {
+      status.textContent = 'Saving…';
+      fetch('/attribution/api/settings/visit-logging', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: select.value }),
+      })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('failed')); })
+        .then(function () {
+          status.textContent = 'Saved.';
+          setTimeout(function () { status.textContent = ''; }, 2000);
+        })
+        .catch(function () {
+          status.textContent = 'Could not save — try again.';
+        });
+    });
+  }
+
+  async function load() {
+    const meRes = await fetch('/attribution/api/me', { credentials: 'include' });
+    if (!meRes.ok) {
+      window.location.href = '/attribution/login';
+      return;
+    }
+    const me = await meRes.json();
+    document.getElementById('tenant-name').textContent = me.name;
+
+    const summaryRes = await fetch('/attribution/api/summary', { credentials: 'include' });
+    if (!summaryRes.ok) {
+      window.location.href = '/attribution/login';
+      return;
+    }
+    const s = await summaryRes.json();
+
+    document.getElementById('stat-identities').textContent = s.identifiedIdentities;
+    document.getElementById('stat-touchpoints').textContent = s.totalTouchpoints;
+    document.getElementById('stat-total').textContent = s.totalIdentities;
+
+    renderInstall(me.install, s.totalTouchpoints > 0);
+    renderVisitLogging(me);
+    renderBars(document.getElementById('first-touch-bars'), s.firstTouchChannelCounts);
+    renderBars(document.getElementById('last-touch-bars'), s.lastTouchChannelCounts);
+    renderCampaigns(document.getElementById('campaigns-table'), s.topCampaigns);
+    renderRecent(document.getElementById('recent-table'), s.recent);
+
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('content').style.display = 'block';
+  }
+
+  document.getElementById('logout-btn').addEventListener('click', async function () {
+    await fetch('/attribution/api/logout', { method: 'POST', credentials: 'include' });
+    window.location.href = '/attribution';
+  });
+
+  // Lazily renders the columns panel the first time it's opened (its
+  // content doesn't exist until then), then just toggles visibility on
+  // later clicks — the panel re-renders itself on every actual change
+  // (see renderColumnsPanel's checkbox/move-button handlers), so no
+  // "rebuild on open" logic is needed here beyond the first time.
+  var recentColumnsPanelRendered = false;
+  document.getElementById('recent-columns-btn').addEventListener('click', function () {
+    var panel = document.getElementById('recent-columns-panel');
+    if (!recentColumnsPanelRendered) {
+      renderColumnsPanel(panel);
+      recentColumnsPanelRendered = true;
+    }
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  });
+
+  load().catch(function () {
+    document.getElementById('loading').textContent = 'Something went wrong loading your dashboard.';
+  });
+</script>
+
+</body>
+</html>
