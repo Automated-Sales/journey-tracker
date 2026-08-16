@@ -6,6 +6,7 @@ import { validateSignupForm, provisionSelfServeTenant } from "../lib/portal-sign
 import { buildPortalSummary } from "../lib/portal-summary";
 import { buildProspectsCsv, buildCampaignsCsv } from "../lib/csv";
 import { verifyJourneyToken } from "../lib/journey-link";
+import { createCheckoutSession, createBillingPortalSession, stripeConfigured, isBillingActive } from "../lib/stripe";
 import {
   verifyPassword,
   getSessionCookie,
@@ -96,6 +97,38 @@ async function requireSession(req: Request, res: Response, next: NextFunction) {
 }
 
 /**
+ * Gates the dashboard's own data/export/settings routes on billing state
+ * — the "block dashboard + API access" enforcement described in the
+ * README's Billing section. Deliberately NOT applied to every
+ * requireSession route: /api/me stays reachable so a gated dashboard can
+ * still show *why* (trial ended, payment failed, etc.) and offer the
+ * right button, /api/logout obviously needs to keep working, and the new
+ * /api/billing/* routes below are how a gated tenant gets un-gated. Also
+ * deliberately NOT applied to /api/journey/:identityId further down —
+ * that route serves a Pipedrive rep who isn't the billing-paying user at
+ * all, reached via a link already saved as plain text on a client's live
+ * Pipedrive record (see lib/journey-link.ts); breaking already-issued
+ * links over a billing lapse would strand data inside a customer's own
+ * CRM, a harsher and more surprising failure mode than just blocking the
+ * tenant's own dashboard.
+ *
+ * Also deliberately does NOT touch tracking ingestion (/t/:tenant/api/*,
+ * webhooks) — those are a different router entirely (tenant-middleware.ts,
+ * key/secret-authenticated) and out of scope here on purpose: pausing
+ * *collection* during a billing hiccup would silently lose attribution
+ * data for the gap, which is a worse outcome than just not letting the
+ * lapsed tenant *view* it until they're current again.
+ */
+function requireActiveBilling(req: Request, res: Response, next: NextFunction) {
+  const tenant = req.portalTenant!;
+  if (isBillingActive(tenant.subscriptionStatus)) return next();
+  res.status(402).json({
+    error: "billing_required",
+    subscriptionStatus: tenant.subscriptionStatus,
+  });
+}
+
+/**
  * Validates the pasted Pipedrive token live (same call add-tenant's
  * operator would eyeball manually), creates the tenant, then best-effort
  * runs the exact same custom-field setup `npm run setup:pipedrive` does —
@@ -141,7 +174,30 @@ portalRouter.post("/api/signup", async (req, res) => {
 
   const session = await db.session.create({ tenantId: tenant.id, ttlMs: SESSION_TTL_MS });
   setSessionCookie(res, session.token);
-  res.status(201).json({ tenantId: tenant.id, name: tenant.name });
+
+  // Straight into Stripe Checkout (14-day trial, no charge today) — the
+  // new tenant is 'incomplete' until that finishes, and requireActiveBilling
+  // will keep re-gating the dashboard until it does, so this is the
+  // expected next step rather than optional. If Stripe isn't configured
+  // on this server yet (local dev, or billing not set up), fall back to
+  // going straight to the dashboard instead of failing the signup —
+  // signup.html only redirects to checkoutUrl when one comes back.
+  let checkoutUrl: string | null = null;
+  if (stripeConfigured()) {
+    try {
+      const base = publicBaseUrl(req);
+      checkoutUrl = await createCheckoutSession(tenant, {
+        successUrl: `${base}/dashboard?billing=success`,
+        cancelUrl: `${base}/dashboard?billing=cancelled`,
+      });
+    } catch (err) {
+      console.error(`[portal] could not start checkout for new tenant ${tenant.id}:`, err);
+      // Not fatal — the account exists; the dashboard's own billing gate
+      // will offer a "Start free trial" retry button (see dashboard.html).
+    }
+  }
+
+  res.status(201).json({ tenantId: tenant.id, name: tenant.name, checkoutUrl });
 });
 
 portalRouter.post("/api/login", async (req, res) => {
@@ -176,7 +232,64 @@ portalRouter.get("/api/me", requireSession, (req, res) => {
     email: tenant.signupEmail,
     install: buildInstallInfo(req, tenant),
     pipedriveVisitLogging: tenant.pipedriveVisitLogging,
+    // Deliberately NOT gated by requireActiveBilling (see that function's
+    // doc comment) — the dashboard needs this to know WHY it's gated and
+    // which button to show, which would be circular if this route itself
+    // required active billing.
+    billing: {
+      status: tenant.subscriptionStatus,
+      trialEndsAt: tenant.trialEndsAt ? tenant.trialEndsAt.toISOString() : null,
+      currentPeriodEnd: tenant.currentPeriodEnd ? tenant.currentPeriodEnd.toISOString() : null,
+    },
   });
+});
+
+/**
+ * Starts (or resumes) Stripe Checkout for this tenant's subscription —
+ * called right after signup, and again from the dashboard's billing-gate
+ * banner for an 'incomplete' (abandoned checkout) or 'canceled' tenant.
+ * Not billing-gated itself, for the obvious reason: this is how a gated
+ * tenant gets ungated.
+ */
+portalRouter.post("/api/billing/checkout-session", requireSession, async (req, res) => {
+  const tenant = req.portalTenant!;
+  if (!stripeConfigured()) {
+    return res.status(503).json({ error: "Billing isn't set up on this server yet — contact support." });
+  }
+  const base = publicBaseUrl(req);
+  try {
+    const url = await createCheckoutSession(tenant, {
+      successUrl: `${base}/dashboard?billing=success`,
+      cancelUrl: `${base}/dashboard?billing=cancelled`,
+    });
+    res.json({ url });
+  } catch (err: any) {
+    console.error(`[portal] checkout session failed for tenant ${tenant.id}:`, err);
+    res.status(500).json({ error: err?.message || "Could not start checkout" });
+  }
+});
+
+/**
+ * Stripe's hosted "Manage billing" page — update card, view past
+ * invoices, or cancel. Only works once a tenant has a real Stripe
+ * customer (i.e. trialing/active/past_due, never 'incomplete' — see
+ * lib/stripe.ts's createBillingPortalSession), so the dashboard should
+ * only show this button in those states and route 'incomplete'/'canceled'
+ * back to checkout-session above instead.
+ */
+portalRouter.post("/api/billing/portal-session", requireSession, async (req, res) => {
+  const tenant = req.portalTenant!;
+  if (!stripeConfigured()) {
+    return res.status(503).json({ error: "Billing isn't set up on this server yet — contact support." });
+  }
+  const base = publicBaseUrl(req);
+  try {
+    const url = await createBillingPortalSession(tenant, `${base}/dashboard`);
+    res.json({ url });
+  } catch (err: any) {
+    console.error(`[portal] billing portal session failed for tenant ${tenant.id}:`, err);
+    res.status(400).json({ error: err?.message || "Could not open the billing portal" });
+  }
 });
 
 const VISIT_LOGGING_MODES = ["off", "notes", "activities"] as const;
@@ -189,7 +302,7 @@ const VISIT_LOGGING_MODES = ["off", "notes", "activities"] as const;
  * current, and some reps will find that noisy. See
  * lib/pipedrive-sync.ts's logWebsiteVisit for where this setting is read.
  */
-portalRouter.post("/api/settings/visit-logging", requireSession, async (req, res) => {
+portalRouter.post("/api/settings/visit-logging", requireSession, requireActiveBilling, async (req, res) => {
   const tenant = req.portalTenant!;
   const mode = req.body?.mode;
   if (!VISIT_LOGGING_MODES.includes(mode)) {
@@ -207,7 +320,7 @@ portalRouter.post("/api/settings/visit-logging", requireSession, async (req, res
  * fetch) hits these, so auth is the same session cookie as everything
  * else in this router — no separate token needed.
  */
-portalRouter.get("/api/export/prospects.csv", requireSession, async (req, res) => {
+portalRouter.get("/api/export/prospects.csv", requireSession, requireActiveBilling, async (req, res) => {
   const tenant = req.portalTenant!;
   const [identities, touchpoints] = await Promise.all([
     db.identity.findMany({ where: { tenantId: tenant.id } }),
@@ -218,7 +331,7 @@ portalRouter.get("/api/export/prospects.csv", requireSession, async (req, res) =
   res.send(buildProspectsCsv(identities, touchpoints, tenant.pipedriveCompanyDomain));
 });
 
-portalRouter.get("/api/export/campaigns.csv", requireSession, async (req, res) => {
+portalRouter.get("/api/export/campaigns.csv", requireSession, requireActiveBilling, async (req, res) => {
   const tenant = req.portalTenant!;
   const touchpoints = await db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } });
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -226,7 +339,7 @@ portalRouter.get("/api/export/campaigns.csv", requireSession, async (req, res) =
   res.send(buildCampaignsCsv(touchpoints));
 });
 
-portalRouter.get("/api/summary", requireSession, async (req, res) => {
+portalRouter.get("/api/summary", requireSession, requireActiveBilling, async (req, res) => {
   const tenant = req.portalTenant!;
   const [identities, touchpoints] = await Promise.all([
     db.identity.findMany({ where: { tenantId: tenant.id } }),
@@ -282,7 +395,7 @@ function touchpointToApiShape(tp: Touchpoint) {
  * same defense-in-depth as everywhere else identityId crosses a trust
  * boundary in this app.
  */
-portalRouter.get("/api/prospects/:identityId", requireSession, async (req, res) => {
+portalRouter.get("/api/prospects/:identityId", requireSession, requireActiveBilling, async (req, res) => {
   const tenant = req.portalTenant!;
   const identity = await db.identity.findUnique({ where: { tenantId: tenant.id, id: req.params.identityId } });
   if (!identity) return res.status(404).json({ error: "Not found" });

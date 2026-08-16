@@ -24,6 +24,7 @@
   <div class="as-auth-card">
     <h1>Connect your Pipedrive</h1>
     <p class="sub">Takes about two minutes. Nothing is created in your Pipedrive account until you submit this form.</p>
+    <p class="sub" style="margin-top:-8px;">£99/month after a 14-day free trial. No charge today — cancel anytime.</p>
 
     <div class="as-alert" id="error"></div>
 
@@ -93,6 +94,18 @@
         submitBtn.textContent = 'Create account';
         return;
       }
+      if (data.checkoutUrl) {
+        // On to Stripe Checkout to start the 14-day trial — the account
+        // already exists at this point, so abandoning this step just
+        // leaves it in the "finish setting up billing" state the
+        // dashboard's own gate (see dashboard.html) prompts for next
+        // time they log in.
+        submitBtn.textContent = 'Redirecting to secure checkout…';
+        window.location.href = data.checkoutUrl;
+        return;
+      }
+      // No checkoutUrl came back (billing not configured on this server,
+      // e.g. local dev) — go straight to the dashboard rather than get stuck.
       window.location.href = '/dashboard';
     } catch (err) {
       showError('Could not reach the server — please try again.');

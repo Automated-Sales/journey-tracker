@@ -16,6 +16,7 @@ async function main() {
     console.log(`- ${t.id} (${t.name})`);
     console.log(`    Pipedrive token: ${t.pipedriveApiToken ? "set" : "NOT SET"}`);
     console.log(`    Custom fields:   ${t.personFieldMap ? "set up" : "not run yet (npm run setup:pipedrive)"}`);
+    console.log(`    Billing:         ${t.subscriptionStatus}${t.subscriptionStatus === "incomplete" ? "  <- gated, dashboard blocked until they pay or you run set-tenant-billing" : ""}`);
     console.log(`    Created:         ${t.createdAt.toISOString().slice(0, 10)}`);
   }
 }

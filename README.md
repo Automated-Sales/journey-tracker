@@ -204,6 +204,46 @@ automated-sales.com from screenshots, not extracted hex codes — see
 `server/public/style.css`'s CSS variables at the top if you
 want to swap in exact values or a logo file.
 
+## Billing
+
+Self-serve signups (`/signup`) are a flat £99/month subscription, billed
+through Stripe Checkout/Billing Portal — this app never touches a card
+number itself. New signups get a 14-day free trial (a card is still
+collected up front, standard modern practice, but nothing is charged
+until the trial ends). See `server/src/lib/stripe.ts` for the only place
+this app talks to the Stripe API or writes a tenant's billing state.
+
+- **Getting set up:** create a Product + (one) Price in your Stripe
+  Dashboard, then set `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, and
+  `STRIPE_WEBHOOK_SECRET` — see `.env.example` for exactly where each
+  comes from, including the webhook endpoint URL/events to subscribe to.
+  Changing the price later is just editing the Stripe Price, no
+  redeploy needed.
+- **CLI-onboarded tenants (`npm run add-tenant`) are never billing-gated**
+  — the flat-fee subscription is specifically the self-serve product's
+  billing model, not how every client relationship works. See
+  `add-tenant.ts`'s comment if you ever want to change that for a
+  particular client.
+- **What happens on a lapsed/failed payment:** the dashboard and its data
+  APIs (`/api/summary`, `/api/prospects/:id`, the CSV exports, the visit-
+  logging setting) return `402` until the tenant is current again — see
+  `routes/portal.ts`'s `requireActiveBilling`. Deliberately NOT gated:
+  tracking ingestion (so a billing hiccup never silently drops attribution
+  data for the gap) and the token-authed `/api/journey/:id` route a
+  Pipedrive rep clicks through to (so an already-issued "AS: View
+  Journey" link doesn't break inside a client's live CRM data over a
+  billing issue on their end).
+- **Testing without charging a real card:** use Stripe's test-mode keys
+  (`sk_test_...`) and its published test card numbers; the Stripe CLI's
+  `stripe listen --forward-to localhost:8787/webhooks/stripe` is the
+  easiest way to receive webhook events against a local dev server.
+- `npm run verify-billing` covers the status-mapping/gating logic without
+  needing a live Stripe account; `verify-portal-http.ts` additionally
+  exercises the 402 gate over real HTTP end-to-end. Neither one calls the
+  actual Stripe API (Checkout session creation, the Billing Portal, or a
+  real webhook signature) — that needs a real or Stripe-CLI-simulated
+  account and is worth checking by hand before taking this live.
+
 ## Contact-level or deal-level? Both — but they mean different things
 
 The full, ever-growing touchpoint history lives on the **Person**
@@ -342,6 +382,23 @@ so that one HTTP call is unverified here in the same way
 code paths instead of one. Try a real signup against a real Pipedrive
 account before pointing a client at it.
 
+**Also verified this session, billing:** status-mapping (every Stripe
+subscription status → this app's narrower local one, unknowns default to
+gated rather than open), the dashboard access-gate decision, and the
+DB layer's default/partial-update behavior for the billing columns are
+covered by `npm run verify-billing` (pure logic, no network — same
+pattern as `verify-attribution`/`verify-portal`). The 402 gate itself was
+additionally exercised over real HTTP against a running server
+(`verify-portal-http.ts`'s billing-tenant checks): logging in while
+unpaid still works, `/me` stays reachable and reports the real status,
+`/summary` is blocked with `402 billing_required`. **Not verified, same
+"no outbound network" constraint as above:** any actual call to the
+Stripe API — Checkout session creation, the Billing Portal, or a real
+signed webhook payload — this sandbox has no route to `api.stripe.com`
+either. Do one real signup with a Stripe test card and confirm the
+webhook log shows a 200 (see `DIGITALOCEAN.md`'s Billing section, step 5)
+before switching to live keys.
+
 **Known limitation worth knowing before you scale this up:** the
 database (`sql.js`, see below) is a single file loaded fully into memory
 per process. Two server processes pointed at the same `DATABASE_PATH`
@@ -432,8 +489,10 @@ subdomain with the main site living elsewhere).
   company domain, a webhook secret shared by that tenant's Pipedrive/
   email/ads webhook URLs, a track key for their website snippet, their
   synced Pipedrive custom-field key maps (Person + Deal), and — for
-  self-serve signups only — a login email + hashed password and
-  `signupSource` ('cli' or 'self_serve').
+  self-serve signups only — a login email + hashed password,
+  `signupSource` ('cli' or 'self_serve'), and billing state
+  (`subscriptionStatus`, Stripe customer/subscription ids, trial/period
+  end dates — see "Billing" above).
 - **Session** — one row per logged-in portal session: an opaque token
   (the value stored in the portal's login cookie), the tenant it
   belongs to, and an expiry. Only used by the portal login — has nothing
@@ -476,3 +535,9 @@ inline comments explaining the merge order and why).
 - **A hosted, always-on deployment** — this was built and verified in a
   sandbox session, but actually running it live needs real hosting —
   see `DIGITALOCEAN.md`.
+- **Billing beyond one flat plan** — see "Billing" above: one price,
+  billed monthly, no tiers/usage-based pricing, no annual option, no
+  in-app plan-change UI (Stripe's Billing Portal handles cancel/update-card,
+  but switching plans isn't applicable when there's only one). Failed-
+  payment retries rely entirely on Stripe's own dunning schedule — nothing
+  here sends its own "your card failed" email on top of Stripe's.

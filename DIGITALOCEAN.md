@@ -80,6 +80,11 @@ ever touch it, and so it's obvious what to include in backups:
 mkdir -p /root/journey-tracker-data
 ```
 
+Three more variables (`STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`,
+`STRIPE_WEBHOOK_SECRET`) enable billing for self-serve signups — leave
+them unset for now if you're not ready to charge yet (CLI-onboarded
+tenants work fine either way), and see step 7 below when you are.
+
 ## 4. Run it with pm2
 
 ```bash
@@ -208,7 +213,43 @@ proxy (keeping the URL bar on `automated-sales.co/attribution` exactly)
 isn't an option anymore now that the two apps use different path shapes,
 so a redirect is the only reasonable route if this is ever wanted.
 
-## 7. Backups
+## 7. Billing (Stripe)
+
+Once the subdomain + TLS from step 5 is live (Stripe's webhook needs a
+real HTTPS URL to call), wire up billing — see the README's "Billing"
+section for what this actually gates and how.
+
+1. In the Stripe Dashboard: **Product catalog** → create one Product
+   (e.g. "Attribution — monthly") with one recurring monthly Price.
+   Copy its `price_...` id.
+2. **Developers > API keys** → copy the secret key (`sk_live_...` once
+   you're ready to charge real cards; `sk_test_...` while you're still
+   testing the flow end-to-end).
+3. **Developers > Webhooks** → add an endpoint at
+   `https://attribution.automated-sales.co/webhooks/stripe`, subscribed
+   to `checkout.session.completed`, `customer.subscription.updated`,
+   `customer.subscription.deleted`, and `invoice.payment_failed`. Copy
+   its signing secret (`whsec_...`).
+4. Add all three to `server/.env` on the Droplet:
+   ```bash
+   STRIPE_SECRET_KEY=sk_live_...
+   STRIPE_PRICE_ID=price_...
+   STRIPE_WEBHOOK_SECRET=whsec_...
+   ```
+   then `pm2 restart journey-tracker --update-env` to pick them up (same
+   as any other `.env` change — see step 4.5's redeploy notes for why
+   `--update-env` matters here).
+5. Do one real signup through `/signup` with a Stripe test card
+   (`4242 4242 4242 4242`, any future expiry/CVC) before switching to
+   live keys, and check the Stripe Dashboard's **Developers > Webhooks**
+   log shows the events arriving with a 200 response — that's the
+   webhook endpoint actually reachable from Stripe's side, not just
+   configured.
+
+CLI-onboarded tenants (`npm run add-tenant`) never need any of this —
+see the README for why.
+
+## 8. Backups
 
 The entire database is the one file at `DATABASE_PATH`. A daily cron job
 copying it somewhere durable is a complete backup strategy for this

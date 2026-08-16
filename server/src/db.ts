@@ -146,6 +146,19 @@ async function init() {
   ensureColumn("identities", "leadToDealTouchpoints", "INTEGER");
   ensureColumn("identities", "wonDealId", "INTEGER");
   ensureColumn("identities", "dealToWonTouchpoints", "INTEGER");
+  // Billing (self-serve tenants only — see lib/stripe.ts,
+  // routes/portal.ts's requireActiveBilling, and the README's "Billing"
+  // section). NULL in the DB is resolved to a real default at read time
+  // (rowToTenant) rather than backfilled here, same pattern as
+  // pipedriveVisitLogging above: every tenant that existed before this
+  // column did was CLI-onboarded (self-serve signup didn't exist yet
+  // either), so NULL safely means "exempt, not billing-gated" for all of
+  // them without a migration pass.
+  ensureColumn("tenants", "stripeCustomerId", "TEXT");
+  ensureColumn("tenants", "stripeSubscriptionId", "TEXT");
+  ensureColumn("tenants", "subscriptionStatus", "TEXT");
+  ensureColumn("tenants", "trialEndsAt", "TEXT");
+  ensureColumn("tenants", "currentPeriodEnd", "TEXT");
 
   persist();
 }
@@ -183,6 +196,21 @@ export interface Tenant {
   // time, so existing tenants created before this column existed don't
   // need a migration/backfill — a NULL in the DB just means "off."
   pipedriveVisitLogging: "off" | "notes" | "activities";
+  // Billing (see ensureColumn's comment above for the NULL-default
+  // reasoning). 'exempt' = never billing-gated — every CLI-onboarded
+  // tenant, by default (see add-tenant.ts), plus any self-serve tenant
+  // Dan chooses to comp by hand-editing this column. 'incomplete' = a
+  // self-serve signup that hasn't finished Stripe Checkout yet.
+  // 'trialing'/'active'/'past_due'/'canceled' mirror Stripe's own
+  // subscription.status values directly (see lib/stripe.ts), updated only
+  // by the /webhooks/stripe handler — never written optimistically from
+  // the checkout-session-creation code path, so this always reflects what
+  // Stripe itself last reported, not what we hoped would happen.
+  subscriptionStatus: "incomplete" | "trialing" | "active" | "past_due" | "canceled" | "exempt";
+  stripeCustomerId: string | null;
+  stripeSubscriptionId: string | null;
+  trialEndsAt: Date | null;
+  currentPeriodEnd: Date | null;
   createdAt: Date;
 }
 
@@ -268,6 +296,20 @@ function rowToTenant(row: any): Tenant | null {
     passwordHash: row.passwordHash ?? null,
     signupSource: (row.signupSource as Tenant["signupSource"]) ?? null,
     pipedriveVisitLogging: (row.pipedriveVisitLogging as Tenant["pipedriveVisitLogging"]) || "off",
+    // See the Tenant interface's doc comment: a NULL here means this
+    // tenant predates billing entirely, so it defaults by signupSource —
+    // 'cli' (or the historical null, from before signupSource itself
+    // existed) is exempt; 'self_serve' without a status yet is
+    // 'incomplete' (shouldn't actually happen post-launch, since
+    // provisionSelfServeTenant always sets one explicitly, but this is
+    // the safe fallback rather than silently granting access).
+    subscriptionStatus:
+      (row.subscriptionStatus as Tenant["subscriptionStatus"]) ||
+      (row.signupSource === "self_serve" ? "incomplete" : "exempt"),
+    stripeCustomerId: row.stripeCustomerId ?? null,
+    stripeSubscriptionId: row.stripeSubscriptionId ?? null,
+    trialEndsAt: row.trialEndsAt ? new Date(row.trialEndsAt) : null,
+    currentPeriodEnd: row.currentPeriodEnd ? new Date(row.currentPeriodEnd) : null,
     createdAt: new Date(row.createdAt),
   };
 }
@@ -324,8 +366,13 @@ export const db = {
       signupEmail?: string | null;
       passwordHash?: string | null;
       signupSource?: "cli" | "self_serve" | null;
+      // Almost always omitted — see the default below. Only add-tenant.ts's
+      // (currently unused) escape hatch or a future admin tool would ever
+      // pass this explicitly.
+      subscriptionStatus?: Tenant["subscriptionStatus"];
     }) {
       return withDb(() => {
+        const signupSource = data.signupSource ?? "cli";
         const row = {
           id: data.id,
           name: data.name,
@@ -337,12 +384,24 @@ export const db = {
           dealFieldMap: null as string | null,
           signupEmail: data.signupEmail?.toLowerCase().trim() ?? null,
           passwordHash: data.passwordHash ?? null,
-          signupSource: data.signupSource ?? "cli",
+          signupSource,
+          // CLI-onboarded tenants (Dan's own consulting clients, onboarded
+          // by hand) are exempt from billing by default — the flat-fee
+          // Stripe subscription is specifically the self-serve product's
+          // billing model, not how every client relationship works. A
+          // self-serve signup starts 'incomplete' until Stripe Checkout
+          // completes (see routes/portal.ts's /api/billing/checkout-session
+          // and the webhook handler in lib/stripe.ts).
+          subscriptionStatus: data.subscriptionStatus ?? (signupSource === "self_serve" ? "incomplete" : "exempt"),
+          stripeCustomerId: null as string | null,
+          stripeSubscriptionId: null as string | null,
+          trialEndsAt: null as string | null,
+          currentPeriodEnd: null as string | null,
           createdAt: new Date().toISOString(),
         };
         sqlite.run(
-          `INSERT INTO tenants (id, name, pipedriveApiToken, pipedriveCompanyDomain, trackKey, webhookSecret, personFieldMap, dealFieldMap, signupEmail, passwordHash, signupSource, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tenants (id, name, pipedriveApiToken, pipedriveCompanyDomain, trackKey, webhookSecret, personFieldMap, dealFieldMap, signupEmail, passwordHash, signupSource, subscriptionStatus, stripeCustomerId, stripeSubscriptionId, trialEndsAt, currentPeriodEnd, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             row.id,
             row.name,
@@ -355,6 +414,11 @@ export const db = {
             row.signupEmail,
             row.passwordHash,
             row.signupSource,
+            row.subscriptionStatus,
+            row.stripeCustomerId,
+            row.stripeSubscriptionId,
+            row.trialEndsAt,
+            row.currentPeriodEnd,
             row.createdAt,
           ]
         );
@@ -378,6 +442,54 @@ export const db = {
       return withDb(() => {
         sqlite.run("UPDATE tenants SET pipedriveVisitLogging = ? WHERE id = ?", [mode, id]);
         persist();
+      });
+    },
+
+    findByStripeCustomerId(stripeCustomerId: string) {
+      return withDb(() => rowToTenant(queryOne("SELECT * FROM tenants WHERE stripeCustomerId = ?", [stripeCustomerId])));
+    },
+
+    findByStripeSubscriptionId(stripeSubscriptionId: string) {
+      return withDb(() =>
+        rowToTenant(queryOne("SELECT * FROM tenants WHERE stripeSubscriptionId = ?", [stripeSubscriptionId]))
+      );
+    },
+
+    // Partial update, Prisma-style (an omitted key leaves that column
+    // untouched) — used exclusively by lib/stripe.ts's webhook handler, the
+    // only code path allowed to move a tenant between billing states (see
+    // the Tenant interface's doc comment on subscriptionStatus for why
+    // nothing else writes these columns directly).
+    updateBilling(
+      id: string,
+      data: Partial<
+        Pick<Tenant, "stripeCustomerId" | "stripeSubscriptionId" | "subscriptionStatus" | "trialEndsAt" | "currentPeriodEnd">
+      >
+    ) {
+      return withDb(() => {
+        const existing = queryOne("SELECT * FROM tenants WHERE id = ?", [id]);
+        if (!existing) throw new Error(`Tenant ${id} not found`);
+        const definedData = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
+        const merged = { ...existing, ...definedData };
+        const trialEndsAtIso = (merged.trialEndsAt as Date | string | null)
+          ? new Date(merged.trialEndsAt as Date | string).toISOString()
+          : null;
+        const currentPeriodEndIso = (merged.currentPeriodEnd as Date | string | null)
+          ? new Date(merged.currentPeriodEnd as Date | string).toISOString()
+          : null;
+        sqlite.run(
+          `UPDATE tenants SET stripeCustomerId = ?, stripeSubscriptionId = ?, subscriptionStatus = ?, trialEndsAt = ?, currentPeriodEnd = ? WHERE id = ?`,
+          [
+            merged.stripeCustomerId ?? null,
+            merged.stripeSubscriptionId ?? null,
+            merged.subscriptionStatus ?? null,
+            trialEndsAtIso,
+            currentPeriodEndIso,
+            id,
+          ]
+        );
+        persist();
+        return rowToTenant({ ...merged, trialEndsAt: trialEndsAtIso, currentPeriodEnd: currentPeriodEndIso })!;
       });
     },
 

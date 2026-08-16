@@ -18,6 +18,7 @@
   <a class="as-logo" href="/"><img class="as-logo-mark" src="/assets/logo-mark.png" alt="Automated Sales logo" /> Automated Sales</a>
   <div class="as-nav-actions">
     <span id="tenant-name" style="color:var(--as-body); font-size:14px; font-weight:600;"></span>
+    <button class="as-btn as-btn-text" id="manage-billing-btn" style="display:none;">Manage billing</button>
     <button class="as-btn as-btn-outline" id="logout-btn">Log out</button>
   </div>
 </header>
@@ -26,7 +27,19 @@
   <h2 style="font-size:24px; font-weight:800; margin: 4px 0 24px;">Attribution overview</h2>
 
   <div id="loading" style="color:var(--as-body);">Loading…</div>
+
+  <!-- Shown instead of #content when billing needs attention before this
+       tenant can use the dashboard (subscriptionStatus is 'incomplete',
+       'past_due', or 'canceled' — see routes/portal.ts's requireActiveBilling).
+       Populated by renderBillingGate(). -->
+  <div id="billing-gate" class="as-card as-auth-card" style="display:none; max-width:520px; margin:40px auto;"></div>
+
   <div id="content" style="display:none;">
+
+    <!-- Small, non-blocking banner shown only while subscriptionStatus is
+         'trialing' — populated by renderTrialBanner(). Not present at all
+         once the trial converts to 'active' or the tenant is 'exempt'. -->
+    <div id="trial-banner" style="display:none;"></div>
 
     <div class="as-card as-install-card" id="install-card">
       <div class="as-install-head" id="install-toggle">
@@ -579,18 +592,143 @@
     });
   }
 
+  // Statuses that mean "let them into the dashboard" — kept in sync with
+  // routes/portal.ts's requireActiveBilling by hand (there's no shared
+  // module between server and this plain <script>, same as everywhere
+  // else in this file). Anything else ('incomplete', 'past_due',
+  // 'canceled') is a full-page gate instead of the normal dashboard.
+  var BILLING_OK_STATUSES = ['trialing', 'active', 'exempt'];
+
+  function daysLeft(isoDate) {
+    if (!isoDate) return null;
+    var ms = new Date(isoDate).getTime() - Date.now();
+    return Math.max(0, Math.ceil(ms / (24 * 60 * 60 * 1000)));
+  }
+
+  function startBillingRedirect(endpoint, btn) {
+    var originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Redirecting…';
+    fetch(endpoint, { method: 'POST', credentials: 'include' })
+      .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.data.url) throw new Error(res.data.error || 'failed');
+        window.location.href = res.data.url;
+      })
+      .catch(function () {
+        btn.disabled = false;
+        btn.textContent = originalText;
+        alert("Couldn't reach billing — please try again in a moment, or contact support if this keeps happening.");
+      });
+  }
+
+  // Full-page replacement for #content when this tenant's billing state
+  // means they shouldn't see their data yet — mirrors (but doesn't
+  // replace) the server-side block in requireActiveBilling; this is UX,
+  // not the actual security boundary.
+  function renderBillingGate(status) {
+    var gate = document.getElementById('billing-gate');
+    var copy = {
+      incomplete: {
+        title: 'Finish setting up billing',
+        body: 'Your account is created, but billing wasn’t completed — start your 14-day free trial to unlock the dashboard. No charge today.',
+        btn: 'Start free trial',
+        action: function (btn) { startBillingRedirect('/api/billing/checkout-session', btn); },
+      },
+      past_due: {
+        title: 'There was a problem with your last payment',
+        body: 'Update your payment method to keep your dashboard and tracking data accessible.',
+        btn: 'Update payment method',
+        action: function (btn) { startBillingRedirect('/api/billing/portal-session', btn); },
+      },
+      canceled: {
+        title: 'Your subscription has ended',
+        body: 'Resubscribe to get back into your dashboard — your tracking data is still there, nothing was deleted.',
+        btn: 'Resubscribe',
+        action: function (btn) { startBillingRedirect('/api/billing/checkout-session', btn); },
+      },
+    };
+    var c = copy[status];
+    if (!c) return; // shouldn't happen — caller only invokes this for the three statuses above
+    gate.innerHTML =
+      '<h1 style="font-size:20px;">' + esc(c.title) + '</h1>' +
+      '<p class="sub">' + esc(c.body) + '</p>' +
+      '<button class="as-btn as-btn-green as-btn-block" id="billing-gate-btn">' + esc(c.btn) + '</button>';
+    document.getElementById('billing-gate-btn').addEventListener('click', function () {
+      c.action(this);
+    });
+    document.getElementById('loading').style.display = 'none';
+    gate.style.display = 'block';
+  }
+
+  function renderTrialBanner(me) {
+    if (me.billing.status !== 'trialing') return;
+    var d = daysLeft(me.billing.trialEndsAt);
+    var banner = document.getElementById('trial-banner');
+    banner.className = 'as-card';
+    banner.style.cssText = 'margin-bottom:20px; background:#f2f8ff; border-color:#cfe3fb; display:block;';
+    banner.innerHTML =
+      '<p style="margin:0; font-size:14px;"><strong>' +
+      (d === null ? 'Free trial active.' : d + ' day' + (d === 1 ? '' : 's') + ' left in your free trial.') +
+      '</strong> £99/month afterwards — cancel anytime from Manage billing.</p>';
+  }
+
+  function renderManageBillingButton(me) {
+    var btn = document.getElementById('manage-billing-btn');
+    // Nothing to manage for 'exempt' (not a Stripe customer) or
+    // 'incomplete' (no Stripe customer yet either — that state is only
+    // ever reachable via the full-page gate's own "Start free trial"
+    // button, not this one).
+    if (me.billing.status === 'exempt' || me.billing.status === 'incomplete') return;
+    btn.style.display = 'inline-block';
+    btn.addEventListener('click', function () { startBillingRedirect('/api/billing/portal-session', btn); });
+  }
+
   async function load() {
-    const meRes = await fetch('/api/me', { credentials: 'include' });
-    if (!meRes.ok) {
+    // Land here right after Stripe Checkout with ?billing=success — strip
+    // it immediately so a refresh doesn't re-trigger this branch, then
+    // poll briefly: the webhook that flips subscriptionStatus away from
+    // 'incomplete' (lib/stripe.ts's applySubscriptionToTenant) can take a
+    // moment to arrive, and without this a customer who just paid would
+    // otherwise land straight back on the "please pay" gate for a few
+    // seconds, which reads as broken rather than just-a-beat-behind.
+    var params = new URLSearchParams(window.location.search);
+    var justCheckedOut = params.get('billing') === 'success';
+    if (params.has('billing')) {
+      params.delete('billing');
+      var qs = params.toString();
+      history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : ''));
+    }
+
+    var me = await fetchMe();
+    if (justCheckedOut && me && me.billing.status === 'incomplete') {
+      document.getElementById('loading').textContent = 'Finishing checkout…';
+      for (var attempt = 0; attempt < 8 && me.billing.status === 'incomplete'; attempt++) {
+        await new Promise(function (resolve) { setTimeout(resolve, 1500); });
+        me = await fetchMe();
+        if (!me) break;
+      }
+    }
+    if (!me) {
       window.location.href = '/login';
       return;
     }
-    const me = await meRes.json();
+
     document.getElementById('tenant-name').textContent = me.name;
+    renderManageBillingButton(me);
+
+    if (BILLING_OK_STATUSES.indexOf(me.billing.status) === -1) {
+      renderBillingGate(me.billing.status);
+      return;
+    }
 
     const summaryRes = await fetch('/api/summary', { credentials: 'include' });
     if (!summaryRes.ok) {
-      window.location.href = '/login';
+      // 402 here would mean the client-side check above and the server
+      // disagree (a real bug) or the status changed between the two
+      // calls — either way, a fresh load re-evaluates from scratch rather
+      // than showing a confusing partial dashboard.
+      window.location.reload();
       return;
     }
     const s = await summaryRes.json();
@@ -599,6 +737,7 @@
     document.getElementById('stat-touchpoints').textContent = s.totalTouchpoints;
     document.getElementById('stat-total').textContent = s.totalIdentities;
 
+    renderTrialBanner(me);
     renderInstall(me.install, s.totalTouchpoints > 0);
     renderVisitLogging(me);
     renderBars(document.getElementById('first-touch-bars'), s.firstTouchChannelCounts);
@@ -608,6 +747,12 @@
 
     document.getElementById('loading').style.display = 'none';
     document.getElementById('content').style.display = 'block';
+  }
+
+  async function fetchMe() {
+    var res = await fetch('/api/me', { credentials: 'include' });
+    if (!res.ok) return null;
+    return res.json();
   }
 
   document.getElementById('logout-btn').addEventListener('click', async function () {

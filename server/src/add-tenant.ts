@@ -59,6 +59,17 @@ async function main() {
     process.exit(1);
   }
 
+  // signupSource defaults to "cli" here (unset), which db.tenant.create
+  // maps to subscriptionStatus "exempt" — a tenant onboarded this way is
+  // never billing-gated, regardless of Stripe being configured. That's
+  // deliberate: the flat-fee Stripe subscription (see README "Billing")
+  // is specifically the self-serve product's billing model. A client
+  // onboarded by hand through this script is presumably billed some other
+  // way (a consulting retainer, a one-off arrangement, etc.) — if you
+  // ever want a CLI-onboarded tenant to actually go through Stripe too,
+  // edit its subscriptionStatus column directly (or extend this script
+  // with a --require-billing flag) rather than expecting it to happen
+  // automatically.
   const tenant = await db.tenant.create({
     id: args.slug,
     name: args.name,

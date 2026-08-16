@@ -7,6 +7,7 @@ import { identifyRouter } from "./routes/identify";
 import { journeyRouter } from "./routes/journey";
 import { webhooksRouter } from "./routes/webhooks";
 import { portalRouter } from "./routes/portal";
+import { constructStripeEvent, handleStripeEvent } from "./lib/stripe";
 
 const app = express();
 
@@ -15,6 +16,33 @@ const app = express();
 // Used to build the tenant install snippet shown on the dashboard when
 // PUBLIC_BASE_URL isn't set explicitly. See routes/portal.ts.
 app.set("trust proxy", true);
+
+// Stripe's webhook signature check (lib/stripe.ts's constructStripeEvent)
+// needs the exact raw request bytes, not the parsed object express.json()
+// below would hand it — so this route is registered here, before that
+// global JSON body parser, with its own express.raw() middleware scoped
+// to just this one path. See DIGITALOCEAN.md/.env.example for how to
+// point a Stripe webhook endpoint at this URL.
+app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+  let event;
+  try {
+    event = constructStripeEvent(req.body, req.headers["stripe-signature"]);
+  } catch (err: any) {
+    console.error("[stripe webhook] signature verification failed:", err?.message || err);
+    return res.status(400).send(`Webhook Error: ${err?.message || "invalid signature"}`);
+  }
+  try {
+    await handleStripeEvent(event);
+    res.json({ received: true });
+  } catch (err) {
+    // Non-2xx tells Stripe to retry with backoff — the right response for
+    // a transient failure (e.g. this server's DB write hiccuped), rather
+    // than silently swallowing an event Stripe would otherwise never
+    // resend.
+    console.error(`[stripe webhook] handling ${event.type} failed:`, err);
+    res.status(500).json({ error: "Webhook handler failed" });
+  }
+});
 
 app.use(express.json({ limit: "1mb" }));
 
