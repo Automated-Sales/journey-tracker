@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { db } from "../db";
+import { db, Tenant, Identity } from "../db";
 import { recordTouchpoint, mergeIdentities } from "../lib/identity";
 import { freezeDealAttribution, syncPersonAttribution, freezeLeadAttribution, syncDealMilestoneField } from "../lib/pipedrive-sync";
 import { requireTenant, requireTenantSecret } from "./tenant-middleware";
-import { getDeal } from "../lib/pipedrive";
+import { getDeal, getPerson } from "../lib/pipedrive";
 import { countTouchpointsUpTo, countTouchpointsBetween } from "../lib/deal-milestones";
 
 export const webhooksRouter = Router({ mergeParams: true });
@@ -137,6 +137,72 @@ function extractPersonEmail(data: any): string | null {
   return typeof raw === "string" ? raw : null;
 }
 
+// Same shape/extraction logic as extractPersonEmail above — Pipedrive
+// represents phones the same way it represents emails (an array of
+// {label, value, primary} objects on both the webhook payload and the
+// live v2 Person record).
+function extractPersonPhone(data: any): string | null {
+  const raw = data?.phone ?? data?.phones;
+  if (!raw) return null;
+  if (Array.isArray(raw)) {
+    const primary = raw.find((p: any) => p?.primary) || raw[0];
+    return primary?.value ?? null;
+  }
+  return typeof raw === "string" ? raw : null;
+}
+
+/**
+ * Fixes the "(anonymous)" dashboard rows that have a real Pipedrive link
+ * (#12345) sitting right next to them — those show up whenever the
+ * FIRST event we ever see for a contact is a deal/activity/note/lead
+ * webhook rather than person.create/person.change or a website sign-up.
+ * Those handlers only ever have a bare pipedrivePersonId to go on (see
+ * each call site below), never an email, so mergeIdentities creates the
+ * identity without one — and since email only ever gets backfilled from
+ * a LATER person.create/change event, an identity whose contact record
+ * was created in Pipedrive before this integration went live (or was
+ * never edited again afterward) could stay "(anonymous)" forever despite
+ * every touchpoint pointing at a named, known Person.
+ *
+ * Also captures name/phone from the same fetch, as a fallback identifier
+ * for the dashboard's Contact column when email itself turns out to be
+ * genuinely absent from Pipedrive too — real for some clients (e.g. a
+ * lead form that only asks for a phone number). See db.ts's ensureColumn
+ * comment for why phone is display-only, never a matching/merge key.
+ *
+ * This does one live GET /persons/{id} call, but only when the identity
+ * doesn't already have an email — for most contacts (created after
+ * go-live, or ever edited), a person.change webhook already supplied
+ * the email (and, since that handler now also captures it directly, the
+ * name/phone) up front and this is a no-op. A contact whose Person
+ * record genuinely has no email in Pipedrive re-attempts this fetch on
+ * every subsequent deal/activity/note/lead event for them — a
+ * deliberate simplification rather than tracking "we already tried and
+ * it's genuinely empty" with its own column; acceptable given
+ * Pipedrive's rate limits are generous relative to typical webhook
+ * volume, but worth revisiting if it ever shows up as a real cost.
+ */
+async function backfillContactFromPipedrive(tenant: Tenant, identity: Identity, personId: number): Promise<Identity> {
+  if (identity.email || !tenant.pipedriveApiToken) return identity;
+  try {
+    const person = await getPerson(tenant.pipedriveApiToken, personId);
+    const email = extractPersonEmail(person);
+    const name = typeof person?.name === "string" && person.name.trim() ? person.name.trim() : null;
+    const phone = extractPersonPhone(person);
+    if (email || name || phone) {
+      return await mergeIdentities(tenant, {
+        pipedrivePersonId: personId,
+        email: email ?? undefined,
+        name: name ?? undefined,
+        phone: phone ?? undefined,
+      });
+    }
+  } catch (err) {
+    console.error(`[webhooks] backfillContactFromPipedrive failed for tenant ${tenant.id}, person ${personId}:`, err);
+  }
+  return identity;
+}
+
 /**
  * All touchpoints of one channel for an identity, most-recent first — the
  * shared building block for "has this specific Pipedrive event already
@@ -198,6 +264,11 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
 
     if (entity === "person") {
       const email = extractPersonEmail(data);
+      // Same "allowed to be null, mergeIdentities treats null as leave
+      // it alone" reasoning as email — a person.change that only edited,
+      // say, an org field arrives with no name/phone in the diff either.
+      const name = typeof data.name === "string" && data.name.trim() ? data.name.trim() : null;
+      const phone = extractPersonPhone(data);
       if (data.id) {
         // email is intentionally allowed to be null here (see
         // extractPersonEmail's doc comment) — mergeIdentities already
@@ -205,7 +276,7 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
         // and we still want every person event (not just ones that
         // happen to touch the email field) to re-sync in case new
         // touchpoints landed on this identity since the last sync.
-        const identity = await mergeIdentities(tenant, { email, pipedrivePersonId: data.id });
+        const identity = await mergeIdentities(tenant, { email, name, phone, pipedrivePersonId: data.id });
         // Backfill: this Person may already have anonymous touchpoints
         // (ad click, blog visits) recorded before Pipedrive knew who they
         // were. Push the summary now rather than waiting for the next
@@ -231,10 +302,11 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
         // same brand-new contact within the same second, and whichever
         // webhook we process first "wins" the identity unless both paths
         // use the same strength of matching.
-        const identity = await mergeIdentities(tenant, {
+        const identity0 = await mergeIdentities(tenant, {
           pipedrivePersonId: personId,
           pipedriveDealId: data.id ?? undefined,
         });
+        const identity = await backfillContactFromPipedrive(tenant, identity0, personId);
 
         // Only log a touchpoint when the stage genuinely changed — Pipedrive
         // fires a "deal updated" webhook for ANY field edit, including the
@@ -373,10 +445,11 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
     if (entity === "lead") {
       const personId = data.person_id?.value || data.person_id;
       if (personId && data.id) {
-        const identity = await mergeIdentities(tenant, {
+        const identity0 = await mergeIdentities(tenant, {
           pipedrivePersonId: personId,
           pipedriveLeadId: String(data.id),
         });
+        const identity = await backfillContactFromPipedrive(tenant, identity0, personId);
         if (!identity.leadCreatedAt) {
           const leadCreatedAt = data.add_time ? new Date(data.add_time) : new Date();
           await db.identity.setLeadMilestone({
@@ -397,7 +470,8 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
       // surface completed sales activities in a prospect's timeline).
       if (personId && data.id && data.done) {
         // Same race-avoidance as the deal handler above.
-        const identity = await mergeIdentities(tenant, { pipedrivePersonId: personId });
+        const identity0 = await mergeIdentities(tenant, { pipedrivePersonId: personId });
+        const identity = await backfillContactFromPipedrive(tenant, identity0, personId);
 
         // Dedup by activityId — once logged, a later edit to an
         // already-completed activity (updating its notes, say) shouldn't
@@ -430,7 +504,8 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
       const personId = data.person_id;
       if (personId) {
         // Same race-avoidance as the deal handler above.
-        const identity = await mergeIdentities(tenant, { pipedrivePersonId: personId });
+        const identity0 = await mergeIdentities(tenant, { pipedrivePersonId: personId });
+        const identity = await backfillContactFromPipedrive(tenant, identity0, personId);
         await db.touchpoint.create({
           data: {
             tenantId: tenant.id,

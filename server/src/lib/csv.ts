@@ -1,4 +1,4 @@
-import { Identity, Touchpoint } from "../db";
+import { Identity, Touchpoint, isIdentified } from "../db";
 import { buildAttributionSummary } from "./attribution";
 import { deepLinkForPerson } from "./pipedrive";
 
@@ -64,16 +64,16 @@ export function buildProspectsCsv(
 
   const rows: (string | number | null)[][] = [];
   for (const identity of sortedIdentities) {
-    // Matches the dashboard table's "(anonymous)" definition exactly —
-    // same field, same truthiness check — so the CSV and the on-screen
+    // Matches the dashboard table's "identified" definition exactly (see
+    // db.ts's isIdentified) — same check, so the CSV and the on-screen
     // toggle never disagree about which rows count as anonymous.
-    if (!includeAnonymous && !identity.email) continue;
+    if (!includeAnonymous && !isIdentified(identity)) continue;
     const tps = (byIdentity.get(identity.id) ?? []).slice().sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
     const summary = buildAttributionSummary(tps);
     if (!summary) continue;
 
     rows.push([
-      identity.email || "(anonymous)",
+      identity.email || identity.name || identity.phone || "(anonymous)",
       summary.firstTouchChannel,
       summary.firstTouchSource,
       summary.firstTouchMedium ?? "",

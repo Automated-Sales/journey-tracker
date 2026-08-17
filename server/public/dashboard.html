@@ -220,6 +220,7 @@
       </div>
       <div id="recent-columns-panel" class="as-columns-panel" style="display:none;"></div>
       <div id="recent-table"></div>
+      <div id="recent-pagination" class="as-pagination"></div>
     </div>
 
   </div>
@@ -573,10 +574,23 @@
       label: 'Contact',
       alwaysVisible: true,
       render: function (r) {
-        var label = r.email || '(anonymous)';
+        // Same priority as buildProspectsCsv's Contact cell (email >
+        // name > phone > '(anonymous)') — a lead captured with only a
+        // phone number (common for some clients' lead forms) isn't
+        // meaningfully anonymous just because email specifically is
+        // unknown; see db.ts's isIdentified.
+        var label = r.email || r.name || r.phone || '(anonymous)';
         return '<span class="as-contact-cell"><span class="as-row-chevron">▸</span><span title="' + esc(label) + '">' + esc(label) + '</span></span>';
       },
     },
+    // Positioned after Contact, same as Term/Content/Referrer further
+    // down — visible by default like every other column here (there's
+    // no baked-in "hidden by default" set, only whatever a person
+    // toggles off via the Columns panel), for anyone who wants the raw
+    // value even when Contact is already showing email (or one of these
+    // two, when email is unknown).
+    { key: 'name', label: 'Name', render: function (r) { return cellOrDash(r.name); } },
+    { key: 'phone', label: 'Phone', render: function (r) { return cellOrDash(r.phone); } },
     { key: 'firstTouch', label: 'First touch', render: function (r) { return channelBadge(r.firstTouchChannel); } },
     {
       key: 'source',
@@ -726,7 +740,15 @@
   // both, same "one browser, one set of display preferences" idea as
   // every other localStorage-backed setting on this page.
   function renderProspectTable(container, rows) {
-    var visibleRows = showAnonymous ? rows : rows.filter(function (r) { return !!r.email; });
+    // Same "identified" definition as the server (db.ts's isIdentified)
+    // — a name/phone-only lead isn't excluded by this toggle just
+    // because email specifically is unknown. This client-side filter
+    // only ever runs on an already-complete dataset (the modal's full
+    // fetched result — the main paginated table filters server-side
+    // instead, see loadRecentPage's ?anonymous= param), so it's safe
+    // here without the pagination-boundary concerns that server-side
+    // filtering exists to avoid.
+    var visibleRows = showAnonymous ? rows : rows.filter(function (r) { return !!(r.email || r.name || r.phone); });
 
     if (!rows.length) {
       container.innerHTML = '<div class="as-empty">No prospects identified yet.</div>';
@@ -1064,8 +1086,63 @@
     renderConversionTable(document.getElementById('conversion-by-source'), s.conversionBySource, 'source', 'No data yet.');
     renderCampaigns(document.getElementById('campaigns-table'), s.topCampaigns);
     renderConversionTable(document.getElementById('campaign-performance'), s.campaignPerformance, 'campaign', 'No campaign data yet.');
-    renderRecent(document.getElementById('recent-table'), s.recent);
+    // Recently active prospects is deliberately NOT rendered from
+    // s.recent here — that field is capped at 25 (kept only for
+    // backward compat, nothing reads it anymore) and has no pagination
+    // of its own. loadRecentPage (below) fetches from the dedicated
+    // /api/prospects endpoint instead, which returns a true total and
+    // supports paging through every match, not just a 25-row preview.
     return s;
+  }
+
+  // Real pagination for Recently active prospects — separate request
+  // from refreshReports() above, since this table now has its own page
+  // state that doesn't reset just because a report re-rendered, but
+  // DOES need to reset to page 1 whenever the UTM filter or anonymous
+  // toggle changes (a stale page 3 could easily be past the end of a
+  // newly-narrowed result set).
+  var recentPage = 1;
+  var recentPageSize = 50;
+  var recentTotal = 0;
+
+  function renderPagination(container, total, page, pageSize) {
+    if (total === 0) {
+      container.innerHTML = '';
+      return;
+    }
+    var pageCount = Math.max(1, Math.ceil(total / pageSize));
+    var start = total === 0 ? 0 : (page - 1) * pageSize + 1;
+    var end = Math.min(total, page * pageSize);
+    container.innerHTML =
+      '<span>Showing ' + start + '–' + end + ' of ' + total + '</span>' +
+      '<span style="display:flex; gap:8px;">' +
+      '<button type="button" class="as-pagination-btn" id="recent-page-prev"' + (page <= 1 ? ' disabled' : '') + '>← Previous</button>' +
+      '<button type="button" class="as-pagination-btn" id="recent-page-next"' + (page >= pageCount ? ' disabled' : '') + '>Next →</button>' +
+      '</span>';
+    var prevBtn = document.getElementById('recent-page-prev');
+    var nextBtn = document.getElementById('recent-page-next');
+    if (prevBtn) prevBtn.addEventListener('click', function () { loadRecentPage(recentPage - 1); });
+    if (nextBtn) nextBtn.addEventListener('click', function () { loadRecentPage(recentPage + 1); });
+  }
+
+  async function loadRecentPage(page) {
+    recentPage = page;
+    var params = buildUtmQueryParams();
+    params.set('page', String(page));
+    params.set('pageSize', String(recentPageSize));
+    params.set('anonymous', showAnonymous ? '1' : '0');
+    var table = document.getElementById('recent-table');
+    table.innerHTML = '<div class="as-empty">Loading…</div>';
+    try {
+      var res = await fetch('/api/prospects?' + params.toString(), { credentials: 'include' });
+      if (!res.ok) throw new Error('request failed');
+      var data = await res.json();
+      recentTotal = data.total;
+      renderRecent(table, data.prospects);
+      renderPagination(document.getElementById('recent-pagination'), data.total, data.page, data.pageSize);
+    } catch (err) {
+      table.innerHTML = '<div class="as-empty">Something went wrong loading this — try refreshing the page.</div>';
+    }
   }
 
   ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content'].forEach(function (id) {
@@ -1074,6 +1151,7 @@
       if (event.target.value) currentUtmFilter[key] = event.target.value;
       else delete currentUtmFilter[key];
       refreshReports();
+      loadRecentPage(1);
     });
   });
 
@@ -1083,6 +1161,7 @@
       document.getElementById(id).value = '';
     });
     refreshReports();
+    loadRecentPage(1);
   });
 
   async function load() {
@@ -1125,6 +1204,7 @@
 
     const s = await refreshReports();
     if (!s) return; // refreshReports already triggered a reload on failure
+    loadRecentPage(1);
 
     renderTrialBanner(me);
     renderInstall(me.install, s.totalTouchpoints > 0);
@@ -1188,7 +1268,13 @@
   updateCsvExportLink();
   showAnonymousToggle.addEventListener('change', function () {
     setShowAnonymous(showAnonymousToggle.checked);
-    renderRecent(document.getElementById('recent-table'), lastRecentRows);
+    // A refetch, not a client-side re-render of cached rows — anonymous
+    // exclusion happens server-side for this table (see loadRecentPage's
+    // ?anonymous= param) specifically so pagination totals/page
+    // boundaries stay accurate; re-filtering an already-fetched page
+    // client-side could leave a page showing fewer than pageSize rows
+    // while real matches sit unseen on the next page.
+    loadRecentPage(1);
   });
 
   load().catch(function () {

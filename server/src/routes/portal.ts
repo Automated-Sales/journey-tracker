@@ -3,7 +3,7 @@ import { db, Tenant, Touchpoint } from "../db";
 import { getMe, deepLinkForPerson } from "../lib/pipedrive";
 import { setupPipedriveFields } from "../lib/pipedrive-field-setup";
 import { validateSignupForm, provisionSelfServeTenant } from "../lib/portal-signup";
-import { buildPortalSummary, filterProspects, filterIdentities, ProspectFilter, UtmFilter } from "../lib/portal-summary";
+import { buildPortalSummary, filterProspects, filterIdentities, paginateProspects, ProspectFilter, UtmFilter } from "../lib/portal-summary";
 import { buildProspectsCsv, buildCampaignsCsv } from "../lib/csv";
 import { verifyJourneyToken } from "../lib/journey-link";
 import { createCheckoutSession, createBillingPortalSession, stripeConfigured, isBillingActive } from "../lib/stripe";
@@ -390,6 +390,38 @@ portalRouter.get("/api/summary", requireSession, requireActiveBilling, async (re
       : null,
   }));
   res.json({ ...summary, recent: recentWithLinks });
+});
+
+/**
+ * Real pagination for the "Recently active prospects" table — unlike
+ * /api/summary's own `recent` field (capped at 25 for a quick preview),
+ * this returns however many prospects actually match, one page at a
+ * time. Same ?utm_source=/etc and ?anonymous=0/1 query params as
+ * everywhere else on this dashboard, so pagination composes correctly
+ * with both the segment filter bar and the anonymous toggle.
+ *   ?page=2&pageSize=50
+ */
+portalRouter.get("/api/prospects", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+  // Capped at 200 — this endpoint is meant for stepping through pages of
+  // a table a person is actually reading, not bulk data extraction (the
+  // CSV export routes exist for that, and return everything in one go
+  // regardless of this cap).
+  const pageSize = Math.min(200, Math.max(1, parseInt(String(req.query.pageSize || "50"), 10) || 50));
+  const includeAnonymous = req.query.anonymous !== "0";
+  const utmFilter = parseUtmFilterQuery(req);
+
+  const [identities, touchpoints] = await Promise.all([
+    db.identity.findMany({ where: { tenantId: tenant.id } }),
+    db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
+  ]);
+  const { prospects, total } = paginateProspects(identities, touchpoints, { utmFilter, includeAnonymous, page, pageSize });
+  const prospectsWithLinks = prospects.map((r) => ({
+    ...r,
+    pipedriveUrl: r.pipedrivePersonId ? deepLinkForPerson(tenant.pipedriveCompanyDomain, r.pipedrivePersonId) : null,
+  }));
+  res.json({ prospects: prospectsWithLinks, total, page, pageSize });
 });
 
 const FUNNEL_VALUES = ["total", "identified", "lead", "deal", "won"];

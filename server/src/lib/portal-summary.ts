@@ -1,4 +1,4 @@
-import { Identity, Touchpoint } from "../db";
+import { Identity, Touchpoint, isIdentified } from "../db";
 import { buildAttributionSummary } from "./attribution";
 
 /**
@@ -138,6 +138,11 @@ function collectDistinctUtmValues(touchpoints: Touchpoint[]): DistinctUtmValues 
 export interface RecentProspect {
   identityId: string;
   email: string | null;
+  // Display-only fallback identifiers when email is unknown — see
+  // db.ts's ensureColumn comment on identities.name/phone for why these
+  // exist and why they're never used for matching/merging.
+  name: string | null;
+  phone: string | null;
   firstTouchChannel: string;
   lastTouchChannel: string;
   touchpointCount: number;
@@ -234,6 +239,8 @@ function toRecentProspect(identity: Identity, summary: ReturnType<typeof buildAt
   return {
     identityId: identity.id,
     email: identity.email,
+    name: identity.name,
+    phone: identity.phone,
     firstTouchChannel: summary!.firstTouchChannel,
     lastTouchChannel: summary!.lastTouchChannel,
     touchpointCount: summary!.touchpointCount,
@@ -350,6 +357,36 @@ export function filterIdentities(
   utmFilter?: UtmFilter
 ): Identity[] {
   return matchingIdentities(identities, touchpoints, filter, utmFilter).map((m) => m.identity);
+}
+
+// Powers the main "Recently active prospects" table's real pagination —
+// unlike buildPortalSummary's own `recent` field (capped at 25, meant
+// for a quick at-a-glance preview, kept as-is for backward compat since
+// nothing on the dashboard reads it anymore once pagination shipped),
+// this returns however many prospects actually match, sliced to the
+// requested page, plus the true total so the UI can show "Page 2 of 9"
+// correctly. Reuses filterProspects with the same neutral "total" funnel
+// filter the unfiltered CSV export uses (see routes/portal.ts), so
+// pagination and export can never disagree about who counts as a match.
+export function paginateProspects(
+  identities: Identity[],
+  touchpoints: Touchpoint[],
+  opts: { utmFilter?: UtmFilter; includeAnonymous: boolean; page: number; pageSize: number }
+): { prospects: RecentProspect[]; total: number } {
+  let all = filterProspects(identities, touchpoints, { type: "funnel", value: "total" }, opts.utmFilter);
+  // Filtered server-side here (rather than left to the client, the way
+  // the drill-down popup's already-complete, unbounded list does it) —
+  // pagination boundaries need to be computed against the SAME set
+  // that's actually being paged through, or "page 2" could either skip
+  // real rows or repeat ones already shown on page 1 depending on how
+  // many anonymous rows happened to fall on a given page.
+  // Same "identified" definition as everywhere else (see db.ts's
+  // isIdentified) — a name/phone-only lead isn't hidden by the
+  // anonymous toggle just because email specifically is unknown.
+  if (!opts.includeAnonymous) all = all.filter((p) => isIdentified(p));
+  const total = all.length;
+  const start = (opts.page - 1) * opts.pageSize;
+  return { prospects: all.slice(start, start + opts.pageSize), total };
 }
 
 export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoint[], utmFilter?: UtmFilter): PortalSummary {

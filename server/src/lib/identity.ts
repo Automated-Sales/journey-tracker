@@ -85,6 +85,8 @@ export async function mergeIdentities(
   tenant: Tenant,
   params: {
     email?: string | null;
+    name?: string | null;
+    phone?: string | null;
     anonymousId?: string | null;
     pipedrivePersonId?: number | null;
     pipedriveDealId?: number | null;
@@ -121,6 +123,8 @@ export async function mergeIdentities(
       data: {
         tenantId,
         email: email ?? undefined,
+        name: params.name ?? undefined,
+        phone: params.phone ?? undefined,
         anonymousIds: params.anonymousId ?? "",
         pipedrivePersonId: params.pipedrivePersonId ?? undefined,
       },
@@ -163,6 +167,11 @@ export async function mergeIdentities(
     where: { tenantId, id: primary.id },
     data: {
       email: email ?? primary.email ?? undefined,
+      // Same "fill in if missing, never overwrite with older/blanker
+      // data" reasoning as email — a later webhook that happens not to
+      // carry a name/phone shouldn't erase one we already captured.
+      name: params.name ?? primary.name ?? undefined,
+      phone: params.phone ?? primary.phone ?? undefined,
       pipedrivePersonId: params.pipedrivePersonId ?? primary.pipedrivePersonId ?? undefined,
       anonymousIds: Array.from(mergedAnonymousIds).join(","),
       pipedriveDealIds: Array.from(mergedDealIds).join(","),

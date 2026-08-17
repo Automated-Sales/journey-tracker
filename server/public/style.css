@@ -626,6 +626,38 @@ button.as-export-link {
   padding: 8px 10px;
 }
 
+.as-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--as-body);
+}
+
+.as-pagination-btn {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--as-ink);
+  background: #fff;
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-pill);
+  padding: 7px 16px;
+  cursor: pointer;
+}
+
+.as-pagination-btn:disabled {
+  color: #b7bdc6;
+  cursor: default;
+}
+
+.as-pagination-btn:not(:disabled):hover {
+  border-color: var(--as-green);
+  color: var(--as-green-text);
+}
+
 .as-bar-row {
   display: flex;
   align-items: center;

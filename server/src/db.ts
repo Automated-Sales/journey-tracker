@@ -57,6 +57,8 @@ async function init() {
       id TEXT PRIMARY KEY,
       tenantId TEXT NOT NULL,
       email TEXT,
+      name TEXT,
+      phone TEXT,
       anonymousIds TEXT NOT NULL DEFAULT '',
       pipedrivePersonId INTEGER,
       pipedriveDealIds TEXT NOT NULL DEFAULT '',
@@ -164,6 +166,21 @@ async function init() {
   // milestone value and its own idempotency guard.
   ensureColumn("identities", "leadCreatedAt", "TEXT");
   ensureColumn("identities", "leadCreatedLeadId", "TEXT");
+  // A fallback identifier for the dashboard's Contact column when email
+  // is unknown — some clients (Johari included) receive real leads with
+  // only a phone number, never an email, so "(anonymous)" was showing
+  // for contacts that are actually fully identified in Pipedrive. Pulled
+  // from Pipedrive's own Person record (name, phones[].value) the same
+  // moment webhooks.ts's backfillContactFromPipedrive already fetches it
+  // to backfill email — no extra API calls, just capturing more of a
+  // response already being requested. Deliberately NOT used as a
+  // matching/merge key the way email is (see mergeIdentities) — phone
+  // numbers get reformatted inconsistently and can be shared (an office
+  // landline logged against several contacts), so treating two different
+  // touchpoints with "the same" phone as necessarily the same person
+  // would risk silently merging unrelated prospects. This is display-only.
+  ensureColumn("identities", "name", "TEXT");
+  ensureColumn("identities", "phone", "TEXT");
   // Billing (self-serve tenants only — see lib/stripe.ts,
   // routes/portal.ts's requireActiveBilling, and the README's "Billing"
   // section). NULL in the DB is resolved to a real default at read time
@@ -243,6 +260,11 @@ export interface Identity {
   id: string;
   tenantId: string;
   email: string | null;
+  // Display-only fallback identifiers, captured from Pipedrive's Person
+  // record — see db.ts's ensureColumn call for the fuller reasoning
+  // (not a matching key, unlike email).
+  name: string | null;
+  phone: string | null;
   anonymousIds: string;
   pipedrivePersonId: number | null;
   pipedriveDealIds: string;
@@ -267,6 +289,21 @@ export interface Identity {
   leadToDealTouchpoints: number | null;
   wonDealId: number | null;
   dealToWonTouchpoints: number | null;
+}
+
+// The single, shared definition of "not anonymous" — used by the
+// dashboard's Show/Hide anonymous toggle (both the on-screen table and
+// the CSV export), and by pagination's filtering. An identity counts as
+// identified once ANY of these is known, not just email — see
+// ensureColumn's comment on identities.name/phone: a phone-only lead
+// with a real name captured from Pipedrive isn't meaningfully
+// "anonymous" anymore just because we never got their email. Accepts
+// any object with these three fields (not strictly an Identity) so
+// RecentProspect — the dashboard-facing shape derived from Identity,
+// see lib/portal-summary.ts — can reuse the same check without a type
+// dependency loop.
+export function isIdentified(row: { email: string | null; name: string | null; phone: string | null }): boolean {
+  return !!(row.email || row.name || row.phone);
 }
 
 export interface Touchpoint {
@@ -349,6 +386,8 @@ function rowToIdentity(row: any): Identity | null {
     id: row.id,
     tenantId: row.tenantId,
     email: row.email ?? null,
+    name: row.name ?? null,
+    phone: row.phone ?? null,
     anonymousIds: row.anonymousIds ?? "",
     pipedrivePersonId: row.pipedrivePersonId ?? null,
     pipedriveDealIds: row.pipedriveDealIds ?? "",
@@ -655,6 +694,8 @@ export const db = {
           id: newId(),
           tenantId: data.tenantId,
           email: data.email ?? null,
+          name: data.name ?? null,
+          phone: data.phone ?? null,
           anonymousIds: data.anonymousIds ?? "",
           pipedrivePersonId: data.pipedrivePersonId ?? null,
           pipedriveDealIds: data.pipedriveDealIds ?? "",
@@ -663,12 +704,14 @@ export const db = {
           lastSeenAt: now,
         };
         sqlite.run(
-          `INSERT INTO identities (id, tenantId, email, anonymousIds, pipedrivePersonId, pipedriveDealIds, pipedriveLeadIds, firstSeenAt, lastSeenAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO identities (id, tenantId, email, name, phone, anonymousIds, pipedrivePersonId, pipedriveDealIds, pipedriveLeadIds, firstSeenAt, lastSeenAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             row.id,
             row.tenantId,
             row.email,
+            row.name,
+            row.phone,
             row.anonymousIds,
             row.pipedrivePersonId,
             row.pipedriveDealIds,
@@ -698,9 +741,11 @@ export const db = {
           lastSeenAt: (data.lastSeenAt as Date | undefined)?.toISOString?.() ?? new Date().toISOString(),
         };
         sqlite.run(
-          `UPDATE identities SET email = ?, anonymousIds = ?, pipedrivePersonId = ?, pipedriveDealIds = ?, pipedriveLeadIds = ?, lastSeenAt = ? WHERE tenantId = ? AND id = ?`,
+          `UPDATE identities SET email = ?, name = ?, phone = ?, anonymousIds = ?, pipedrivePersonId = ?, pipedriveDealIds = ?, pipedriveLeadIds = ?, lastSeenAt = ? WHERE tenantId = ? AND id = ?`,
           [
             merged.email,
+            merged.name,
+            merged.phone,
             merged.anonymousIds,
             merged.pipedrivePersonId,
             merged.pipedriveDealIds,

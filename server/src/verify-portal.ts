@@ -18,7 +18,7 @@ import "dotenv/config";
 import { db } from "./db";
 import { hashPassword, verifyPassword } from "./lib/auth";
 import { validateSignupForm, provisionSelfServeTenant } from "./lib/portal-signup";
-import { buildPortalSummary, filterProspects, filterIdentities } from "./lib/portal-summary";
+import { buildPortalSummary, filterProspects, filterIdentities, paginateProspects } from "./lib/portal-summary";
 import { buildProspectsCsv, buildCampaignsCsv } from "./lib/csv";
 import { Identity, Touchpoint } from "./db";
 
@@ -59,6 +59,8 @@ function fixtureIdentity(overrides: Partial<Identity>): Identity {
     id: overrides.id || Math.random().toString(36).slice(2),
     tenantId: "t1",
     email: null,
+    name: null,
+    phone: null,
     anonymousIds: "",
     pipedrivePersonId: null,
     pipedriveDealIds: "",
@@ -288,6 +290,15 @@ async function main() {
     "filterIdentities: returns the raw Identity row (not a RecentProspect), for the CSV export route to feed into buildProspectsCsv"
   );
 
+  // --- paginateProspects (Recently active prospects' real pagination) ---
+  const page1 = paginateProspects([idAConverted, idB, idC], tps, { includeAnonymous: true, page: 1, pageSize: 1 });
+  assert(page1.total === 2 && page1.prospects.length === 1, "paginateProspects: total reflects every matching prospect (2), even though pageSize only returns 1 of them");
+  assert(page1.prospects[0].identityId === "idB", "paginateProspects: page 1 returns the most-recently-seen match first (idB, lastSeenAt 01-12), same sort order as the old capped `recent` list");
+  const page2 = paginateProspects([idAConverted, idB, idC], tps, { includeAnonymous: true, page: 2, pageSize: 1 });
+  assert(page2.prospects.length === 1 && page2.prospects[0].identityId === "idA", "paginateProspects: page 2 returns the next match (idA), not a repeat of page 1");
+  const pastLastPage = paginateProspects([idAConverted, idB, idC], tps, { includeAnonymous: true, page: 5, pageSize: 1 });
+  assert(pastLastPage.prospects.length === 0 && pastLastPage.total === 2, "paginateProspects: requesting a page past the end returns an empty page, not an error, while total stays accurate");
+
   // --- UTM filter (segments every report, not just the drill-down) ------
   const utmFilteredSummary = buildPortalSummary([idAConverted, idB, idC], tps, { source: "linkedin_ads" });
   assert(
@@ -368,6 +379,37 @@ async function main() {
     fixtureTouchpoint({ identityId: "idD", channel: "website_visit", occurredAt: new Date("2026-01-15") }),
   ]);
   assert(anonCsv.includes("(anonymous),"), "buildProspectsCsv: an identity with no email exports as '(anonymous)', not a blank cell");
+
+  // --- phone/name-only identification (no email) -------------------------
+  const phoneOnlyIdentity = fixtureIdentity({
+    id: "idF",
+    email: null,
+    name: "Jason Smith",
+    phone: "+44 7700 900123",
+    lastSeenAt: new Date("2026-01-17"),
+  });
+  const phoneOnlyTp = fixtureTouchpoint({ identityId: "idF", channel: "pipedrive_activity", source: "pipedrive", occurredAt: new Date("2026-01-17") });
+
+  const phoneOnlyCsv = buildProspectsCsv([phoneOnlyIdentity], [phoneOnlyTp]);
+  assert(
+    phoneOnlyCsv.includes("Jason Smith,"),
+    "buildProspectsCsv: a phone-only lead's Contact cell shows their captured name, not '(anonymous)', even with no email"
+  );
+
+  const noNamePhoneOnlyCsv = buildProspectsCsv(
+    [fixtureIdentity({ id: "idG", email: null, name: null, phone: "+44 7700 900456", lastSeenAt: new Date("2026-01-17") })],
+    [fixtureTouchpoint({ identityId: "idG", channel: "pipedrive_activity", occurredAt: new Date("2026-01-17") })]
+  );
+  assert(
+    noNamePhoneOnlyCsv.includes("+44 7700 900456,"),
+    "buildProspectsCsv: falls back to phone when name is also unknown, still not '(anonymous)'"
+  );
+
+  const phoneOnlyExcludedCsv = buildProspectsCsv([phoneOnlyIdentity], [phoneOnlyTp], null, false);
+  assert(
+    phoneOnlyExcludedCsv.includes("Jason Smith"),
+    "buildProspectsCsv: includeAnonymous=false does NOT exclude a phone/name-only lead — that's the whole point of isIdentified() treating name/phone as identification, same as email"
+  );
 
   const injectionCsv = buildProspectsCsv(
     [fixtureIdentity({ id: "idE", email: "=cmd|' /C calc'!A0", lastSeenAt: new Date("2026-01-16") })],
