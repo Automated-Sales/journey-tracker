@@ -194,6 +194,11 @@ async function init() {
   ensureColumn("tenants", "subscriptionStatus", "TEXT");
   ensureColumn("tenants", "trialEndsAt", "TEXT");
   ensureColumn("tenants", "currentPeriodEnd", "TEXT");
+  // See the Tenant interface's doc comment above these two fields for
+  // the fuller reasoning — a per-tenant fallback source for leads our
+  // own tracking never saw.
+  ensureColumn("tenants", "leadSourceFieldKey", "TEXT");
+  ensureColumn("tenants", "leadSourceFieldLabel", "TEXT");
 
   persist();
 }
@@ -247,6 +252,23 @@ export interface Tenant {
   trialEndsAt: Date | null;
   currentPeriodEnd: Date | null;
   createdAt: Date;
+  // Optional per-tenant fallback attribution source — configured via
+  // Stage 2's settings page (not yet built; for now, set via
+  // set-tenant-lead-source-field.ts). When a Lead webhook arrives for an
+  // identity with NO existing touchpoints at all (see webhooks.ts's
+  // "lead" handler), the value of this Pipedrive Lead/Deal custom field
+  // — read straight off the webhook payload, no extra API call needed —
+  // becomes that identity's one and only first-touch source. This never
+  // overrides real tracked data; it only fills the gap for a lead that
+  // came in through a channel our own tracking snippet could never see
+  // (e.g. a native Facebook Lead Form feeding Pipedrive through a
+  // third-party tool like WhatConverts, with no website visit at all).
+  // leadSourceFieldKey is the raw Pipedrive field key (the long hash);
+  // leadSourceFieldLabel is the human-readable name, stored purely for
+  // display (e.g. on a future settings page showing "currently mapped:
+  // Social Form Source") — never used for matching/lookup.
+  leadSourceFieldKey: string | null;
+  leadSourceFieldLabel: string | null;
 }
 
 export interface Session {
@@ -377,6 +399,8 @@ function rowToTenant(row: any): Tenant | null {
     trialEndsAt: row.trialEndsAt ? new Date(row.trialEndsAt) : null,
     currentPeriodEnd: row.currentPeriodEnd ? new Date(row.currentPeriodEnd) : null,
     createdAt: new Date(row.createdAt),
+    leadSourceFieldKey: row.leadSourceFieldKey ?? null,
+    leadSourceFieldLabel: row.leadSourceFieldLabel ?? null,
   };
 }
 
@@ -577,6 +601,25 @@ export const db = {
         sqlite.run("UPDATE tenants SET signupEmail = ?, passwordHash = ? WHERE id = ?", [
           data.signupEmail.toLowerCase().trim(),
           data.passwordHash,
+          id,
+        ]);
+        persist();
+      });
+    },
+
+    // Sets or clears (pass both fields null) the per-tenant fallback
+    // lead-source field mapping — see the Tenant interface's doc comment
+    // on leadSourceFieldKey. Currently only reachable via
+    // set-tenant-lead-source-field.ts (Stage 1); a future settings page
+    // (Stage 2) will call this same method from an authenticated route
+    // instead of a CLI script.
+    updateLeadSourceField(id: string, data: { leadSourceFieldKey: string | null; leadSourceFieldLabel: string | null }) {
+      return withDb(() => {
+        const existing = queryOne("SELECT * FROM tenants WHERE id = ?", [id]);
+        if (!existing) throw new Error(`Tenant ${id} not found`);
+        sqlite.run("UPDATE tenants SET leadSourceFieldKey = ?, leadSourceFieldLabel = ? WHERE id = ?", [
+          data.leadSourceFieldKey,
+          data.leadSourceFieldLabel,
           id,
         ]);
         persist();
@@ -946,6 +989,16 @@ export const db = {
         ]);
         persist();
         return rowToTouchpoint(queryOne("SELECT * FROM touchpoints WHERE id = ? AND tenantId = ?", [id, tenantId]));
+      });
+    },
+
+    // For backfill-activity-source.ts's one-off repair only — every
+    // normal write path sets `source` once at creation (see create()
+    // above) and never revisits it afterward.
+    updateSource({ id, tenantId, source }: { id: string; tenantId: string; source: string }) {
+      return withDb(() => {
+        sqlite.run("UPDATE touchpoints SET source = ? WHERE id = ? AND tenantId = ?", [source, id, tenantId]);
+        persist();
       });
     },
 

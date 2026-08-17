@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { db, Tenant, Touchpoint } from "../db";
-import { getMe, deepLinkForPerson } from "../lib/pipedrive";
+import { getMe, deepLinkForPerson, listDealFields } from "../lib/pipedrive";
 import { setupPipedriveFields } from "../lib/pipedrive-field-setup";
 import { validateSignupForm, provisionSelfServeTenant } from "../lib/portal-signup";
 import { buildPortalSummary, filterProspects, filterIdentities, paginateProspects, ProspectFilter, UtmFilter } from "../lib/portal-summary";
@@ -310,6 +310,73 @@ portalRouter.post("/api/settings/visit-logging", requireSession, requireActiveBi
   }
   await db.tenant.updateVisitLogging(tenant.id, mode);
   res.json({ ok: true, pipedriveVisitLogging: mode });
+});
+
+/**
+ * Stage 2 of the lead-source-field feature (Stage 1 was the CLI script,
+ * set-tenant-lead-source-field.ts — still works, this is the same thing
+ * through the dashboard instead). See db.ts's Tenant interface doc
+ * comment on leadSourceFieldKey for the full reasoning.
+ *
+ * Fetches the tenant's Lead/Deal field list live from Pipedrive on every
+ * load (not cached) — this is a settings page someone visits rarely, and
+ * a field a client added yesterday should show up immediately rather
+ * than waiting on some cache to expire.
+ */
+portalRouter.get("/api/settings/lead-source-field", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const current = tenant.leadSourceFieldKey
+    ? { key: tenant.leadSourceFieldKey, name: tenant.leadSourceFieldLabel }
+    : null;
+
+  if (!tenant.pipedriveApiToken) {
+    return res.json({ current, fields: [], error: "No Pipedrive API token configured for this tenant yet." });
+  }
+
+  try {
+    const fields = await listDealFields(tenant.pipedriveApiToken);
+    const options = fields
+      .filter((f: any) => typeof f.name === "string" && typeof f.key === "string")
+      .map((f: any) => ({ key: f.key, name: f.name }))
+      .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name));
+    res.json({ current, fields: options });
+  } catch (err: any) {
+    console.error(`[settings] failed to list Pipedrive fields for tenant ${tenant.id}:`, err);
+    res.status(502).json({ current, fields: [], error: "Couldn't fetch fields from Pipedrive — check the API token is still valid." });
+  }
+});
+
+/**
+ * Re-validates the chosen key against Pipedrive's live field list before
+ * saving (rather than trusting whatever the client sent) — cheap
+ * insurance against saving a stale reference to a field a client renamed
+ * or deleted between page load and clicking Save.
+ */
+portalRouter.post("/api/settings/lead-source-field", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const key = req.body?.key;
+
+  if (!key) {
+    await db.tenant.updateLeadSourceField(tenant.id, { leadSourceFieldKey: null, leadSourceFieldLabel: null });
+    return res.json({ ok: true, current: null });
+  }
+
+  if (!tenant.pipedriveApiToken) {
+    return res.status(400).json({ error: "No Pipedrive API token configured for this tenant." });
+  }
+
+  try {
+    const fields = await listDealFields(tenant.pipedriveApiToken);
+    const match = fields.find((f: any) => f.key === key);
+    if (!match) {
+      return res.status(400).json({ error: "That field no longer exists in Pipedrive — refresh the page and try again." });
+    }
+    await db.tenant.updateLeadSourceField(tenant.id, { leadSourceFieldKey: match.key, leadSourceFieldLabel: match.name });
+    res.json({ ok: true, current: { key: match.key, name: match.name } });
+  } catch (err: any) {
+    console.error(`[settings] failed to save lead-source field for tenant ${tenant.id}:`, err);
+    res.status(502).json({ error: "Couldn't verify that field against Pipedrive — try again." });
+  }
 });
 
 /**

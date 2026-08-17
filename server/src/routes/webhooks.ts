@@ -452,6 +452,52 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
         const identity = await backfillContactFromPipedrive(tenant, identity0, personId);
         if (!identity.leadCreatedAt) {
           const leadCreatedAt = data.add_time ? new Date(data.add_time) : new Date();
+
+          // Per-tenant configured fallback source (see db.ts's Tenant
+          // interface doc comment on leadSourceFieldKey) — ONLY applied
+          // when this identity has zero touchpoints of any kind, i.e.
+          // our own tracking never saw this person at all (a lead that
+          // came in through, say, a native Facebook Lead Form via a
+          // third-party tool, with no website visit). Real tracked data
+          // — even a single anonymous ad click or page view — always
+          // wins; this never overrides or competes with it. Custom
+          // field values arrive as flat top-level properties directly
+          // on the Lead webhook payload (same convention confirmed
+          // earlier for writing them back via updateLeadCustomFields),
+          // so no extra Pipedrive API call is needed to read this.
+          if (tenant.leadSourceFieldKey) {
+            const existingTouchpoints = await db.touchpoint.findMany({
+              where: { tenantId: tenant.id, identityId: identity.id },
+            });
+            if (existingTouchpoints.length === 0) {
+              const fieldValue = data[tenant.leadSourceFieldKey];
+              if (typeof fieldValue === "string" && fieldValue.trim()) {
+                await db.touchpoint.create({
+                  data: {
+                    tenantId: tenant.id,
+                    identityId: identity.id,
+                    channel: "lead_source_field",
+                    // The raw value as-is, whatever shape it happens to
+                    // be for this tenant (a URL, a plain label, etc) —
+                    // deliberately not parsed/reformatted, since its
+                    // structure is entirely tenant-specific and unknown
+                    // to us in general.
+                    source: fieldValue.trim(),
+                    title: `Lead source (${tenant.leadSourceFieldLabel || "configured field"}): ${fieldValue.trim()}`,
+                    metadata: JSON.stringify({ leadSourceFieldKey: tenant.leadSourceFieldKey }),
+                    occurredAt: leadCreatedAt,
+                  },
+                });
+                // Immediate backfill, same "push now rather than wait
+                // for the next unrelated event" pattern as the person
+                // handler above — this identity's Person-level AS:
+                // fields would otherwise stay blank until some later,
+                // unrelated webhook happens to re-trigger a sync.
+                await syncPersonAttribution(tenant, identity);
+              }
+            }
+          }
+
           await db.identity.setLeadMilestone({
             where: { tenantId: tenant.id, id: identity.id },
             data: { leadCreatedAt, leadCreatedLeadId: String(data.id) },
@@ -486,7 +532,15 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
               tenantId: tenant.id,
               identityId: identity.id,
               channel: "pipedrive_activity",
-              source: "pipedrive",
+              // Pipedrive's own activity type (call, meeting, task, or a
+              // custom type like "whatsapp_chat") — a genuinely useful
+              // attribution signal on its own, so it belongs in the
+              // structured `source` field, filterable/reportable like
+              // any website source, not just buried inside the free-text
+              // title below. Falls back to "pipedrive" only if Pipedrive
+              // somehow sends an activity with no type at all (activity
+              // type is normally a required field when one's created).
+              source: data.type || "pipedrive",
               title: `${data.type || "Activity"} completed: ${data.subject || ""}`.trim(),
               metadata: JSON.stringify({ activityId: data.id, done: data.done }),
               occurredAt: resolveActivityOccurredAt(data),

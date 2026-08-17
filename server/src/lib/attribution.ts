@@ -19,6 +19,10 @@ const CHANNEL_LABELS: Record<string, string> = {
   // surfaces organic social as a distinct bucket instead of lumping it
   // in with generic direct/website traffic.
   social_organic: "Organic social",
+  // See types.ts's Channel doc comment for this one — a per-tenant
+  // configured Pipedrive field, used only as a last-resort fallback for
+  // a lead our own tracking never saw at all.
+  lead_source_field: "Lead form",
 };
 
 export interface AttributionSummary {

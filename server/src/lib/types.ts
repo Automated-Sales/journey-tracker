@@ -8,7 +8,13 @@ export type Channel =
   | "email_reply"
   | "pipedrive_activity"
   | "pipedrive_stage_change"
-  | "pipedrive_note";
+  | "pipedrive_note"
+  // A per-tenant configured fallback (Tenant.leadSourceFieldKey) — used
+  // only when a Lead arrives for an identity with zero other
+  // touchpoints, i.e. someone our own tracking never saw at all. See
+  // webhooks.ts's "lead" handler and db.ts's Tenant interface doc
+  // comment for the fuller reasoning.
+  | "lead_source_field";
 
 export interface RawTouchpoint {
   channel: Channel;

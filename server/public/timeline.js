@@ -28,6 +28,9 @@ var CHANNEL_META = {
   pipedrive_activity: { label: 'Sales activity', color: '#EF8C1F' },
   pipedrive_stage_change: { label: 'Deal stage', color: '#2E7D32' },
   pipedrive_note: { label: 'Note', color: '#8A8A8A' },
+  // See db.ts's Tenant.leadSourceFieldKey doc comment — a per-tenant
+  // configured fallback for leads our own tracking never saw at all.
+  lead_source_field: { label: 'Lead form', color: '#C77D19' },
 };
 
 function metaFor(channel) {

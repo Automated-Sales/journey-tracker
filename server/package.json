@@ -19,7 +19,9 @@
     "list-tenants": "ts-node src/list-tenants.ts",
     "set-tenant-billing": "ts-node src/set-tenant-billing.ts",
     "set-tenant-login": "ts-node src/set-tenant-login.ts",
-    "resync-lead": "ts-node src/resync-lead.ts"
+    "resync-lead": "ts-node src/resync-lead.ts",
+    "backfill-activity-source": "ts-node src/backfill-activity-source.ts",
+    "set-tenant-lead-source-field": "ts-node src/set-tenant-lead-source-field.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
