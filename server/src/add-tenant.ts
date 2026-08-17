@@ -123,14 +123,18 @@ Subscribe to: person.create, person.change, deal.change, activity.create, note.c
     console.log("=".repeat(70));
     console.log("5. NEXT: create this tenant's Pipedrive custom fields:");
     console.log("=".repeat(70));
-    console.log(`npm run setup:pipedrive -- --tenant ${tenant.id}\n`);
+    console.log(
+      `pm2 stop journey-tracker\nnpm run setup:pipedrive -- --tenant ${tenant.id}\npm2 start journey-tracker\n\n(the pm2 stop/start matters — see setup-pipedrive-fields.ts's doc comment)\n`
+    );
   } else {
     console.log("=".repeat(70));
     console.log("5. STILL NEEDED: this tenant has no Pipedrive API token yet.");
     console.log("=".repeat(70));
     console.log(`Once you have it, add --pipedrive-token/--pipedrive-domain (edit the
 tenants table, or delete and re-run add-tenant), then:
-  npm run setup:pipedrive -- --tenant ${tenant.id}\n`);
+  pm2 stop journey-tracker
+  npm run setup:pipedrive -- --tenant ${tenant.id}
+  pm2 start journey-tracker\n`);
   }
 
   console.log("=".repeat(70));

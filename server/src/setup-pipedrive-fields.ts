@@ -5,7 +5,25 @@
  * by name first and only creates what's missing, then saves the full
  * name -> key mapping onto that tenant's row for the sync code to use.
  *
- * Run with: npm run setup:pipedrive -- --tenant <slug>
+ * Run with:
+ *   pm2 stop journey-tracker
+ *   npm run setup:pipedrive -- --tenant <slug>
+ *   pm2 start journey-tracker
+ *
+ * The pm2 stop/start matters: this script's final step persists the new
+ * field map to the shared sql.js DB file. If the live server is still
+ * running, its own in-memory copy of that file (predating this write)
+ * will get flushed back to disk on its own next persist() — e.g. the
+ * very next touchpoint or webhook event — silently overwriting the field
+ * map back to null with no error anywhere. When that happens, tracking
+ * and the dashboard keep working fine, but every Pipedrive Person/Deal
+ * custom field silently stays empty forever, since syncPersonAttribution
+ * and freezeDealAttribution both no-op when personFieldMap/dealFieldMap
+ * is null (see pipedrive-sync.ts). Same single-process caution as
+ * add-tenant.ts/set-tenant-billing.ts/set-tenant-login.ts — this script
+ * just didn't say so until this comment was added, after exactly this
+ * happened once. Use debug-person.ts afterward (with pm2 still stopped)
+ * to confirm the map actually landed before restarting.
  *
  * NOTE: this is the one part of the integration we couldn't verify
  * against a live Pipedrive account when this was first built — the exact
