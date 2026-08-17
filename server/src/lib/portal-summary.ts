@@ -32,11 +32,27 @@ export interface CampaignCount {
 // looks today," consistent with how firstTouchChannelCounts/topCampaigns
 // already work, rather than mixing living and frozen-at-a-past-moment
 // data in the same view.
+// Revenue is kept per-currency rather than summed into one blended
+// number — adding £500 + $500 together would produce a meaningless
+// total. Most tenants only ever see one currency here in practice, but
+// this stays correct even if a tenant's deals aren't all in one.
+export type RevenueByCurrency = Record<string, number>;
+
 export interface SourceConversion {
   source: string;
   total: number;
   converted: number;
   rate: number; // 0–1, converted / total
+  // Only from WON deals (not just "has a Deal") — see dealValue's doc
+  // comment in db.ts. Empty object if nothing's been won from this
+  // source yet, or none of the won deals had a captured value.
+  wonRevenue: RevenueByCurrency;
+  // Average days from first touch to Deal created, across converted
+  // identities in this group — null if nobody's converted yet. A
+  // genuinely different signal from the conversion rate itself: two
+  // sources can convert at the same rate but close at very different
+  // speeds.
+  avgDaysToConvert: number | null;
 }
 
 export interface CampaignPerformance {
@@ -44,6 +60,8 @@ export interface CampaignPerformance {
   total: number; // distinct identities whose first touch had this campaign — NOT the same count as topCampaigns above, which counts every touchpoint (so one prospect with 3 visits under the same campaign counts 3x there, 1x here). Kept as a separate field/panel rather than changing topCampaigns' existing meaning, since the CSV export and any saved links to it shouldn't silently change shape.
   converted: number;
   rate: number;
+  wonRevenue: RevenueByCurrency;
+  avgDaysToConvert: number | null;
 }
 
 // One entry per funnel stage, in order — deliberately an array rather
@@ -53,6 +71,24 @@ export interface CampaignPerformance {
 export interface FunnelStage {
   stage: string;
   count: number;
+}
+
+// One entry per week (Monday-start, UTC), covering the last
+// CONVERSION_TREND_WEEKS weeks — a trend line, not a snapshot: shows
+// whether a cohort's conversion rate is improving or declining over
+// time, which the single-number rate in conversionBySource/
+// campaignPerformance can't. IMPORTANT interpretation caveat, worth
+// surfacing in the UI: `converted` reflects each identity's CURRENT
+// state (has a Deal right now), not "had converted by the end of that
+// week" — so a cohort from last week hasn't had as much time to convert
+// as one from 10 weeks ago, and its rate will look artificially low for
+// that reason alone, not necessarily because the leads were worse. The
+// most recent 1–2 weeks should generally be read with that in mind.
+export interface ConversionTrendWeek {
+  weekStart: string; // YYYY-MM-DD, the Monday that week starts on (UTC)
+  total: number;
+  converted: number;
+  rate: number;
 }
 
 export interface TouchpointsByDay {
@@ -194,6 +230,7 @@ export interface PortalSummary {
   campaignPerformance: CampaignPerformance[];
   funnel: FunnelStage[];
   touchpointsByDay: TouchpointsByDay[];
+  conversionTrend: ConversionTrendWeek[];
   distinctUtmValues: DistinctUtmValues;
 }
 
@@ -208,31 +245,77 @@ function toSortedChannelCounts(m: Map<string, number>): ChannelCount[] {
 // first-touch attribute, count how many of each group have a Deal,"
 // just keyed differently. Two small typed wrappers rather than one
 // generic function, to keep the call sites plainly typed.
-function toSourceConversions(totals: Map<string, number>, converted: Map<string, number>): SourceConversion[] {
+function averageOf(nums: number[] | undefined): number | null {
+  if (!nums || !nums.length) return null;
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+function revenueMapToObject(m: Map<string, number> | undefined): RevenueByCurrency {
+  return m ? Object.fromEntries(m.entries()) : {};
+}
+
+function toSourceConversions(
+  totals: Map<string, number>,
+  converted: Map<string, number>,
+  revenue: Map<string, Map<string, number>>,
+  daysToConvert: Map<string, number[]>
+): SourceConversion[] {
   return Array.from(totals.entries())
     .map(([source, total]) => {
       const won = converted.get(source) ?? 0;
-      return { source, total, converted: won, rate: total > 0 ? won / total : 0 };
+      return {
+        source,
+        total,
+        converted: won,
+        rate: total > 0 ? won / total : 0,
+        wonRevenue: revenueMapToObject(revenue.get(source)),
+        avgDaysToConvert: averageOf(daysToConvert.get(source)),
+      };
     })
     .sort((a, b) => b.total - a.total);
 }
 
-function toCampaignPerformance(totals: Map<string, number>, converted: Map<string, number>): CampaignPerformance[] {
+function toCampaignPerformance(
+  totals: Map<string, number>,
+  converted: Map<string, number>,
+  revenue: Map<string, Map<string, number>>,
+  daysToConvert: Map<string, number[]>
+): CampaignPerformance[] {
   return Array.from(totals.entries())
     .map(([campaign, total]) => {
       const won = converted.get(campaign) ?? 0;
-      return { campaign, total, converted: won, rate: total > 0 ? won / total : 0 };
+      return {
+        campaign,
+        total,
+        converted: won,
+        rate: total > 0 ? won / total : 0,
+        wonRevenue: revenueMapToObject(revenue.get(campaign)),
+        avgDaysToConvert: averageOf(daysToConvert.get(campaign)),
+      };
     })
     .sort((a, b) => b.total - a.total);
 }
 
 const TOUCHPOINTS_BY_DAY_WINDOW_DAYS = 30;
+const CONVERSION_TREND_WEEKS = 12;
 
 // UTC calendar-day bucketing — see TouchpointsByDay's doc comment for
 // why UTC specifically. toISOString().slice(0, 10) is a cheap, exact way
 // to get "YYYY-MM-DD in UTC" without a date library.
 function dayKey(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+// The Monday (UTC) of the week containing d, at 00:00:00 — the week
+// bucket key for ConversionTrendWeek. getUTCDay() is 0=Sunday..6=Saturday;
+// the -6/+1 below maps that onto "days back to the most recent Monday."
+function mondayOfWeek(d: Date): Date {
+  const day = d.getUTCDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(d);
+  monday.setUTCDate(d.getUTCDate() + diffToMonday);
+  monday.setUTCHours(0, 0, 0, 0);
+  return monday;
 }
 
 function toRecentProspect(identity: Identity, summary: ReturnType<typeof buildAttributionSummary>): RecentProspect {
@@ -412,6 +495,10 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
   const sourceConverted = new Map<string, number>();
   const campaignTotals = new Map<string, number>();
   const campaignConverted = new Map<string, number>();
+  const sourceRevenue = new Map<string, Map<string, number>>();
+  const campaignRevenue = new Map<string, Map<string, number>>();
+  const sourceDaysToConvert = new Map<string, number[]>();
+  const campaignDaysToConvert = new Map<string, number[]>();
   let leadCreatedCount = 0;
   let dealCreatedCount = 0;
   let wonCount = 0;
@@ -424,6 +511,16 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
   let matchedCount = 0;
   let matchedIdentifiedCount = 0;
   const matchedIdentityIds = new Set<string>();
+
+  // Zero-filled ahead of time (same reasoning as touchpointsByDay) so a
+  // genuinely quiet week shows as 0%, not simply absent from the chart.
+  const trendWeeks = new Map<string, { total: number; converted: number }>();
+  const currentWeekStart = mondayOfWeek(new Date());
+  for (let i = CONVERSION_TREND_WEEKS - 1; i >= 0; i--) {
+    const ws = new Date(currentWeekStart.getTime() - i * 7 * 24 * 60 * 60 * 1000);
+    trendWeeks.set(dayKey(ws), { total: 0, converted: 0 });
+  }
+  const trendWindowStart = new Date(currentWeekStart.getTime() - (CONVERSION_TREND_WEEKS - 1) * 7 * 24 * 60 * 60 * 1000);
 
   for (const identity of identities) {
     const tps = (byIdentity.get(identity.id) ?? [])
@@ -459,6 +556,48 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
       if (converted) {
         campaignConverted.set(summary.firstTouchCampaign, (campaignConverted.get(summary.firstTouchCampaign) ?? 0) + 1);
       }
+    }
+
+    // Revenue — only from WON deals with a captured value, kept
+    // per-currency (see RevenueByCurrency's doc comment).
+    if (identity.wonDealId !== null && identity.dealValue !== null && identity.dealCurrency) {
+      const bySource = sourceRevenue.get(summary.firstTouchSource) ?? new Map<string, number>();
+      bySource.set(identity.dealCurrency, (bySource.get(identity.dealCurrency) ?? 0) + identity.dealValue);
+      sourceRevenue.set(summary.firstTouchSource, bySource);
+      if (summary.firstTouchCampaign) {
+        const byCampaign = campaignRevenue.get(summary.firstTouchCampaign) ?? new Map<string, number>();
+        byCampaign.set(identity.dealCurrency, (byCampaign.get(identity.dealCurrency) ?? 0) + identity.dealValue);
+        campaignRevenue.set(summary.firstTouchCampaign, byCampaign);
+      }
+    }
+
+    // Time-to-convert — days from first touch to Deal created, one
+    // sample per converted identity, averaged later in
+    // toSourceConversions/toCampaignPerformance.
+    if (converted && identity.dealCreatedAt) {
+      const days = Math.max(
+        0,
+        (identity.dealCreatedAt.getTime() - new Date(summary.firstTouchDate).getTime()) / (24 * 60 * 60 * 1000)
+      );
+      const sourceDays = sourceDaysToConvert.get(summary.firstTouchSource) ?? [];
+      sourceDays.push(days);
+      sourceDaysToConvert.set(summary.firstTouchSource, sourceDays);
+      if (summary.firstTouchCampaign) {
+        const campaignDays = campaignDaysToConvert.get(summary.firstTouchCampaign) ?? [];
+        campaignDays.push(days);
+        campaignDaysToConvert.set(summary.firstTouchCampaign, campaignDays);
+      }
+    }
+
+    // Conversion trend — which week bucket this identity's first touch
+    // falls into, using CURRENT converted state (see
+    // ConversionTrendWeek's doc comment on why that's an intentional,
+    // documented interpretation choice, not an oversight).
+    const firstTouchWeekKey = dayKey(mondayOfWeek(new Date(summary.firstTouchDate)));
+    if (new Date(summary.firstTouchDate) >= trendWindowStart && trendWeeks.has(firstTouchWeekKey)) {
+      const bucket = trendWeeks.get(firstTouchWeekKey)!;
+      bucket.total++;
+      if (converted) bucket.converted++;
     }
 
     recent.push(toRecentProspect(identity, summary));
@@ -507,8 +646,11 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
       .sort((a, b) => b.count - a.count)
       .slice(0, 10),
     recent: recent.slice(0, 25),
-    conversionBySource: toSourceConversions(sourceTotals, sourceConverted).slice(0, 15),
-    campaignPerformance: toCampaignPerformance(campaignTotals, campaignConverted).slice(0, 15),
+    conversionBySource: toSourceConversions(sourceTotals, sourceConverted, sourceRevenue, sourceDaysToConvert).slice(0, 15),
+    campaignPerformance: toCampaignPerformance(campaignTotals, campaignConverted, campaignRevenue, campaignDaysToConvert).slice(
+      0,
+      15
+    ),
     funnel: [
       { stage: "Total tracked", count: filterActive ? matchedCount : identities.length },
       { stage: "Identified", count: filterActive ? matchedIdentifiedCount : identities.filter((i) => i.email).length },
@@ -517,6 +659,14 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
       { stage: "Won", count: wonCount },
     ],
     touchpointsByDay,
+    conversionTrend: Array.from(trendWeeks.entries())
+      .map(([weekStart, { total, converted }]) => ({
+        weekStart,
+        total,
+        converted,
+        rate: total > 0 ? converted / total : 0,
+      }))
+      .sort((a, b) => (a.weekStart < b.weekStart ? -1 : 1)),
     distinctUtmValues,
   };
 }

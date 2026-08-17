@@ -149,6 +149,11 @@ async function init() {
   ensureColumn("identities", "leadToDealTouchpoints", "INTEGER");
   ensureColumn("identities", "wonDealId", "INTEGER");
   ensureColumn("identities", "dealToWonTouchpoints", "INTEGER");
+  // See the Identity interface's doc comment on dealWonAt — the moment
+  // this was computed but never saved anywhere.
+  ensureColumn("identities", "dealWonAt", "TEXT");
+  ensureColumn("identities", "dealValue", "REAL");
+  ensureColumn("identities", "dealCurrency", "TEXT");
   // Added when Lead-level (pre-Deal-conversion) attribution sync was
   // built — see pipedrive-sync.ts's syncLeadAttribution and
   // webhooks.ts's "lead" entity handler. Any tenant row created before
@@ -311,6 +316,20 @@ export interface Identity {
   leadToDealTouchpoints: number | null;
   wonDealId: number | null;
   dealToWonTouchpoints: number | null;
+  // Was computed in-memory to derive dealToWonTouchpoints (see
+  // webhooks.ts's deal "won" handler) but never actually saved until
+  // now — needed by csv.ts's Google Ads conversion export, which
+  // requires a real timestamp for the "Conversion Time" column.
+  dealWonAt: Date | null;
+  // The Deal's monetary value AT THE MOMENT IT WAS WON (not its
+  // estimated value at creation, which can change during negotiation) —
+  // captured alongside dealWonAt, same webhook handler. Powers revenue
+  // reporting in portal-summary.ts (conversionBySource/
+  // campaignPerformance's revenueByCurrency). Kept per-currency rather
+  // than blended into one number — see revenueByCurrency's own doc
+  // comment for why summing across different currencies would be wrong.
+  dealValue: number | null;
+  dealCurrency: string | null;
 }
 
 // The single, shared definition of "not anonymous" — used by the
@@ -425,6 +444,9 @@ function rowToIdentity(row: any): Identity | null {
     leadToDealTouchpoints: row.leadToDealTouchpoints ?? null,
     wonDealId: row.wonDealId ?? null,
     dealToWonTouchpoints: row.dealToWonTouchpoints ?? null,
+    dealWonAt: row.dealWonAt ? new Date(row.dealWonAt) : null,
+    dealValue: typeof row.dealValue === "number" ? row.dealValue : row.dealValue ? Number(row.dealValue) : null,
+    dealCurrency: row.dealCurrency ?? null,
   };
 }
 
@@ -845,7 +867,17 @@ export const db = {
     }: {
       where: { tenantId: string; id: string };
       data: Partial<
-        Pick<Identity, "dealCreatedDealId" | "dealCreatedAt" | "leadToDealTouchpoints" | "wonDealId" | "dealToWonTouchpoints">
+        Pick<
+          Identity,
+          | "dealCreatedDealId"
+          | "dealCreatedAt"
+          | "leadToDealTouchpoints"
+          | "wonDealId"
+          | "dealToWonTouchpoints"
+          | "dealWonAt"
+          | "dealValue"
+          | "dealCurrency"
+        >
       >;
     }) {
       return withDb(() => {
@@ -858,20 +890,26 @@ export const db = {
         const dealCreatedAtIso = (merged.dealCreatedAt as Date | string | null)
           ? new Date(merged.dealCreatedAt as Date | string).toISOString()
           : null;
+        const dealWonAtIso = (merged.dealWonAt as Date | string | null)
+          ? new Date(merged.dealWonAt as Date | string).toISOString()
+          : null;
         sqlite.run(
-          `UPDATE identities SET dealCreatedDealId = ?, dealCreatedAt = ?, leadToDealTouchpoints = ?, wonDealId = ?, dealToWonTouchpoints = ? WHERE tenantId = ? AND id = ?`,
+          `UPDATE identities SET dealCreatedDealId = ?, dealCreatedAt = ?, leadToDealTouchpoints = ?, wonDealId = ?, dealToWonTouchpoints = ?, dealWonAt = ?, dealValue = ?, dealCurrency = ? WHERE tenantId = ? AND id = ?`,
           [
             merged.dealCreatedDealId ?? null,
             dealCreatedAtIso,
             merged.leadToDealTouchpoints ?? null,
             merged.wonDealId ?? null,
             merged.dealToWonTouchpoints ?? null,
+            dealWonAtIso,
+            merged.dealValue ?? null,
+            merged.dealCurrency ?? null,
             where.tenantId,
             where.id,
           ]
         );
         persist();
-        return rowToIdentity({ ...merged, dealCreatedAt: dealCreatedAtIso })!;
+        return rowToIdentity({ ...merged, dealCreatedAt: dealCreatedAtIso, dealWonAt: dealWonAtIso })!;
       });
     },
 

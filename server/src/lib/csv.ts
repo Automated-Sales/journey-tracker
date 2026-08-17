@@ -158,3 +158,83 @@ export function buildCampaignsCsv(touchpoints: Touchpoint[]): string {
 
   return toCsv(["Campaign", "Touchpoints"], rows);
 }
+
+// yyyy-MM-dd HH:mm:ss +0000 — Google's documented format for the
+// Conversion Time column, confirmed against multiple current (2026)
+// sources at the time this was written. Every timestamp already stored
+// in this app is effectively UTC, so the offset is always +0000 — no
+// per-tenant timezone handling needed.
+function formatGoogleAdsTime(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(
+    d.getUTCMinutes()
+  )}:${pad(d.getUTCSeconds())} +0000`;
+}
+
+/**
+ * The dashboard's "Google Ads conversion feedback" export (see
+ * routes/portal.ts and dashboard.html's matching card) — closes the
+ * loop between Pipedrive outcomes and Google Ads' own bidding
+ * algorithms. Upload the resulting file in Google Ads under Tools and
+ * settings → Conversions → Uploads (5-column format: Google Click ID,
+ * Conversion Name, Conversion Time, Conversion Value, Currency Code —
+ * this is the standard, broadly-documented manual-upload format, not
+ * the newer scheduled "Data Manager → upload from a URL" flow, which
+ * has its own quirks; worth a quick check against the current Google
+ * Ads UI before first use, since Google has been actively changing this
+ * area of its product throughout 2026).
+ *
+ * Two conversion events per qualifying identity, not just one:
+ *   - "CRM Deal Created" (zero value) — fires far more often than a
+ *     Won deal, giving Google's Smart Bidding more volume to learn from
+ *     sooner. Google's own guidance suggests ~30+ conversions/month
+ *     before bidding algorithms stabilize; for a lower-volume tenant,
+ *     Won-only would likely never reach that on its own.
+ *   - "CRM Deal Won" — the clear, high-confidence "this was a good
+ *     lead" signal.
+ * Both require a Conversion Action created in the client's Google Ads
+ * account with a name matching EXACTLY (character-for-character,
+ * including capitalization) — that's a one-time setup step on their
+ * side, same idea as the Pipedrive custom fields needing setup:pipedrive
+ * run once per tenant.
+ *
+ * Conversion Value/Currency are always blank: this app doesn't capture
+ * Pipedrive's Deal monetary value anywhere yet, so there's nothing
+ * accurate to report. Leaving them blank is valid per Google's spec
+ * (both columns are optional) — Target CPA bidding works fine without
+ * them; Target ROAS specifically wants real values, so that's a natural
+ * next step if this proves useful (capture Deal.value on the deal
+ * webhook, same pattern as everything else in webhooks.ts).
+ *
+ * Only includes identities whose FIRST touch had a Google Click ID
+ * (ad_click channel touchpoints capture this) — nothing to match a
+ * conversion to an ad click without one, so those rows are silently
+ * skipped rather than exported with a blank GCLID (which Google would
+ * just reject anyway).
+ */
+export function buildGoogleAdsConversionsCsv(identities: Identity[], touchpoints: Touchpoint[]): string {
+  const byIdentity = new Map<string, Touchpoint[]>();
+  for (const tp of touchpoints) {
+    if (!tp.identityId) continue;
+    const list = byIdentity.get(tp.identityId) ?? [];
+    list.push(tp);
+    byIdentity.set(tp.identityId, list);
+  }
+
+  const rows: (string | number | null)[][] = [];
+  for (const identity of identities) {
+    const tps = byIdentity.get(identity.id) ?? [];
+    const summary = buildAttributionSummary(tps);
+    const gclid = summary?.firstTouchGclid;
+    if (!gclid) continue;
+
+    if (identity.dealCreatedDealId !== null && identity.dealCreatedAt) {
+      rows.push([gclid, "CRM Deal Created", formatGoogleAdsTime(identity.dealCreatedAt), "", ""]);
+    }
+    if (identity.wonDealId !== null && identity.dealWonAt) {
+      rows.push([gclid, "CRM Deal Won", formatGoogleAdsTime(identity.dealWonAt), "", ""]);
+    }
+  }
+
+  return toCsv(["Google Click ID", "Conversion Name", "Conversion Time", "Conversion Value", "Currency Code"], rows);
+}

@@ -797,6 +797,39 @@ button.as-export-link {
   color: var(--as-green-text);
 }
 
+/* Volume/Rate sort toggle above conversion-by-source and
+   campaign-performance tables (dashboard.html's renderConversionTable). */
+.as-sort-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
+}
+
+.as-sort-toggle-label {
+  color: var(--as-body);
+  font-weight: 600;
+}
+
+.as-sort-btn {
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--as-body);
+  background: #fff;
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-pill);
+  padding: 5px 14px;
+  cursor: pointer;
+}
+
+.as-sort-btn-active {
+  color: #fff;
+  background: var(--as-green);
+  border-color: var(--as-green);
+}
+
 /* Drill-down affordance — funnel rows and conversion-table rows that,
    when clicked, filter the Recently active prospects table below (see
    dashboard.html's applyProspectFilter). */

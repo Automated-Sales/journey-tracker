@@ -19,7 +19,7 @@ import { db } from "./db";
 import { hashPassword, verifyPassword } from "./lib/auth";
 import { validateSignupForm, provisionSelfServeTenant } from "./lib/portal-signup";
 import { buildPortalSummary, filterProspects, filterIdentities, paginateProspects } from "./lib/portal-summary";
-import { buildProspectsCsv, buildCampaignsCsv } from "./lib/csv";
+import { buildProspectsCsv, buildCampaignsCsv, buildGoogleAdsConversionsCsv } from "./lib/csv";
 import { Identity, Touchpoint } from "./db";
 
 function assert(cond: boolean, msg: string) {
@@ -74,6 +74,9 @@ function fixtureIdentity(overrides: Partial<Identity>): Identity {
     leadToDealTouchpoints: null,
     wonDealId: null,
     dealToWonTouchpoints: null,
+    dealWonAt: null,
+    dealValue: null,
+    dealCurrency: null,
     ...overrides,
   };
 }
@@ -241,6 +244,45 @@ async function main() {
       convSummary.funnel.find((f) => f.stage === "Deal created")?.count === 1 &&
       convSummary.funnel.find((f) => f.stage === "Won")?.count === 0,
     "funnel: counts narrow correctly at each stage (only idA reached Lead/Deal, nobody's Won yet)"
+  );
+
+  // --- revenue / time-to-convert (conversionBySource & campaignPerformance) ---
+  // idA's first touch (linkedin_ads) was 2026-01-01; giving it a
+  // dealCreatedAt 10 days later plus a Won deal with a real value lets
+  // us check both new fields land in the same linkedin_ads row.
+  const idAWithRevenue = fixtureIdentity({
+    id: "idA",
+    email: "a@example.com",
+    lastSeenAt: new Date("2026-01-11"),
+    dealCreatedDealId: 501,
+    dealCreatedAt: new Date("2026-01-11"),
+    wonDealId: 501,
+    dealValue: 5000,
+    dealCurrency: "GBP",
+  });
+  const revenueSummary = buildPortalSummary([idAWithRevenue, idB, idC], tps);
+  const linkedinRow = revenueSummary.conversionBySource.find((c) => c.source === "linkedin_ads");
+  assert(linkedinRow?.wonRevenue.GBP === 5000, "conversionBySource: wonRevenue is keyed by currency and only counts WON deals with a captured value");
+  assert(linkedinRow?.avgDaysToConvert === 10, "conversionBySource: avgDaysToConvert is the gap between first touch (Jan 1) and dealCreatedAt (Jan 11) — exactly 10 days");
+  const mailchimpRow = revenueSummary.conversionBySource.find((c) => c.source === "mailchimp");
+  assert(
+    Object.keys(mailchimpRow?.wonRevenue ?? { x: 1 }).length === 0 && mailchimpRow?.avgDaysToConvert === null,
+    "conversionBySource: a source with no converted identities shows empty wonRevenue and null avgDaysToConvert, not 0 or NaN"
+  );
+
+  // --- conversionTrend -----------------------------------------------------
+  const trendTp = fixtureTouchpoint({ identityId: "idA", channel: "ad_click", source: "linkedin_ads", occurredAt: new Date() });
+  const trendIdentity = fixtureIdentity({ id: "idA", email: "a@example.com", dealCreatedDealId: 501 });
+  const trendSummary = buildPortalSummary([trendIdentity], [trendTp]);
+  assert(trendSummary.conversionTrend.length === 12, "conversionTrend: always returns exactly 12 zero-filled weeks");
+  assert(
+    trendSummary.conversionTrend.every((w, i) => i === 0 || trendSummary.conversionTrend[i - 1].weekStart < w.weekStart),
+    "conversionTrend: weeks are in strictly ascending order"
+  );
+  const thisWeek = trendSummary.conversionTrend[trendSummary.conversionTrend.length - 1];
+  assert(
+    thisWeek.total === 1 && thisWeek.converted === 1 && thisWeek.rate === 1,
+    "conversionTrend: a first touch occurring right now lands in the final (this week's) bucket, and reflects the identity's CURRENT converted state"
   );
 
   const recentTp = fixtureTouchpoint({ identityId: "idA", channel: "website_visit", occurredAt: new Date() });
@@ -475,6 +517,40 @@ async function main() {
   assert(campaignsLines[1] === "Q1-launch,2", "buildCampaignsCsv: counts campaigns across every identity, uncapped (unlike buildPortalSummary's top 10)");
 
   assert(buildCampaignsCsv([]).trim() === "Campaign,Touchpoints", "buildCampaignsCsv: empty input still returns a valid header-only CSV");
+
+  // --- buildGoogleAdsConversionsCsv --------------------------------------
+  const gclidIdentity = fixtureIdentity({
+    id: "idH",
+    email: "gclid@example.com",
+    dealCreatedDealId: 701,
+    dealCreatedAt: new Date("2026-02-01T10:00:00Z"),
+    wonDealId: 701,
+    dealWonAt: new Date("2026-02-15T14:30:05Z"),
+  });
+  const gclidTp = fixtureTouchpoint({ identityId: "idH", channel: "ad_click", source: "google", gclid: "Cj0KCQjw_test_gclid" });
+
+  const noGclidIdentity = fixtureIdentity({ id: "idI", email: "nogclid@example.com", dealCreatedDealId: 702, dealCreatedAt: new Date("2026-02-01") });
+  const noGclidTp = fixtureTouchpoint({ identityId: "idI", channel: "website_visit", source: "website" });
+
+  const noDealIdentity = fixtureIdentity({ id: "idJ", email: "nodeal@example.com" });
+  const noDealTp = fixtureTouchpoint({ identityId: "idJ", channel: "ad_click", source: "google", gclid: "Cj0K_another_gclid" });
+
+  const gAdsCsv = buildGoogleAdsConversionsCsv([gclidIdentity, noGclidIdentity, noDealIdentity], [gclidTp, noGclidTp, noDealTp]);
+  const gAdsLines = gAdsCsv.trim().split("\r\n");
+  assert(
+    gAdsLines[0] === "Google Click ID,Conversion Name,Conversion Time,Conversion Value,Currency Code",
+    "buildGoogleAdsConversionsCsv: header row matches Google's documented 5-column format"
+  );
+  assert(gAdsLines.length === 3, "buildGoogleAdsConversionsCsv: 2 data rows for idH (Created + Won) + header = 3 lines total — idI (no gclid) and idJ (no deal) produce nothing");
+  assert(
+    gAdsLines.some((l) => l.startsWith("Cj0KCQjw_test_gclid,CRM Deal Created,2026-02-01 10:00:00 +0000")),
+    "buildGoogleAdsConversionsCsv: Deal Created row uses dealCreatedAt, formatted yyyy-MM-dd HH:mm:ss +0000"
+  );
+  assert(
+    gAdsLines.some((l) => l.startsWith("Cj0KCQjw_test_gclid,CRM Deal Won,2026-02-15 14:30:05 +0000")),
+    "buildGoogleAdsConversionsCsv: Deal Won row uses dealWonAt (the timestamp this feature specifically started persisting), not dealCreatedAt or lastSeenAt"
+  );
+  assert(gAdsCsv.includes(",,"), "buildGoogleAdsConversionsCsv: Conversion Value and Currency Code are both blank — no Deal value tracked yet");
 
   // --- cleanup -----------------------------------------------------
   await db.tenant.delete(tenant.id);

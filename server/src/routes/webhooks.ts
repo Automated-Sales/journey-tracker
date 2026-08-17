@@ -408,9 +408,24 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
               orderBy: { occurredAt: "asc" },
             });
             const dealToWonTouchpoints = countTouchpointsBetween(touchpoints, dealCreatedAt, wonAt);
+            // value/currency are read straight off this webhook's own
+            // payload, best-effort — unlike dealCreatedAt above, there's
+            // no live-fetch fallback if a particular "won" webhook
+            // happens to omit them (Pipedrive's partial-diff behavior,
+            // see extractPersonEmail's doc comment), so an occasional
+            // Won deal might end up with no captured value. Acceptable
+            // for now; a live getDeal() fallback (mirroring
+            // dealCreatedAt's own fallback a few lines up) would close
+            // that gap if it turns out to matter in practice.
             await db.identity.setDealMilestone({
               where: { tenantId: tenant.id, id: identity.id },
-              data: { wonDealId: data.id, dealToWonTouchpoints },
+              data: {
+                wonDealId: data.id,
+                dealToWonTouchpoints,
+                dealWonAt: wonAt,
+                dealValue: typeof data.value === "number" ? data.value : undefined,
+                dealCurrency: typeof data.currency === "string" ? data.currency : undefined,
+              },
             });
             await syncDealMilestoneField(tenant, data.id, "deal_deal_to_won_touchpoints", dealToWonTouchpoints);
           }

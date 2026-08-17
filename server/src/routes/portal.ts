@@ -4,7 +4,7 @@ import { getMe, deepLinkForPerson, listDealFields } from "../lib/pipedrive";
 import { setupPipedriveFields } from "../lib/pipedrive-field-setup";
 import { validateSignupForm, provisionSelfServeTenant } from "../lib/portal-signup";
 import { buildPortalSummary, filterProspects, filterIdentities, paginateProspects, ProspectFilter, UtmFilter } from "../lib/portal-summary";
-import { buildProspectsCsv, buildCampaignsCsv } from "../lib/csv";
+import { buildProspectsCsv, buildCampaignsCsv, buildGoogleAdsConversionsCsv } from "../lib/csv";
 import { verifyJourneyToken } from "../lib/journey-link";
 import { createCheckoutSession, createBillingPortalSession, stripeConfigured, isBillingActive } from "../lib/stripe";
 import {
@@ -417,6 +417,23 @@ portalRouter.get("/api/export/campaigns.csv", requireSession, requireActiveBilli
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="campaigns.csv"');
   res.send(buildCampaignsCsv(touchpoints));
+});
+
+/**
+ * The dashboard's "Google Ads conversion feedback" card — see
+ * lib/csv.ts's buildGoogleAdsConversionsCsv doc comment for the full
+ * design (why two conversion events, why value/currency are blank,
+ * where the exact file format came from).
+ */
+portalRouter.get("/api/export/google-ads-conversions.csv", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const [identities, touchpoints] = await Promise.all([
+    db.identity.findMany({ where: { tenantId: tenant.id } }),
+    db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
+  ]);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="google-ads-conversions.csv"');
+  res.send(buildGoogleAdsConversionsCsv(identities, touchpoints));
 });
 
 // Shared by /api/summary, /api/prospects/filtered, and

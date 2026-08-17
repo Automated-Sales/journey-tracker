@@ -140,6 +140,17 @@
     </div>
 
     <div class="as-card as-install-card" style="margin-bottom:28px;">
+      <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Google Ads conversion feedback</h3>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
+        Tell Google Ads which ad clicks actually became real leads and customers, so its bidding learns to find more like them (and fewer like the ones that didn't). This downloads a file of Deal-created and Deal-won events, matched to the original ad click — upload it in Google Ads under <strong>Tools and settings → Conversions → Uploads</strong>.
+      </p>
+      <p style="background:#fdf6e8; border:1px solid #f0dfae; color:#7a5c12; border-radius:10px; padding:12px 14px; font-size:13px; margin:0 0 16px;">
+        <strong>One-time setup needed first:</strong> create two import-type Conversion Actions in Google Ads named exactly <code>CRM Deal Created</code> and <code>CRM Deal Won</code> (the names must match character-for-character). Only prospects whose first touch was a Google ad click are included — there's nothing to match a conversion to otherwise.
+      </p>
+      <a class="as-btn as-btn-primary" href="/api/export/google-ads-conversions.csv" download>Download conversions CSV</a>
+    </div>
+
+    <div class="as-card as-install-card" style="margin-bottom:28px;">
       <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Tracking social traffic</h3>
       <p style="color:var(--as-body); font-size:13.5px; margin:0 0 12px;">
         <strong>Paid social</strong> (Facebook/Instagram Ads, LinkedIn Ads, etc.) works the same way as Google/Bing Ads: add UTM parameters to the ad's destination URL in the ad platform itself (e.g. <code>?utm_source=facebook&amp;utm_medium=cpc&amp;utm_campaign=...</code>). Facebook and Instagram click IDs (<code>fbclid</code>) are also captured automatically when the platform appends one, the same way <code>gclid</code> is for Google Ads.
@@ -204,6 +215,12 @@
       <p class="as-panel-title">Conversion by source</p>
       <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">How many prospects from each source went on to become a Deal in Pipedrive.</p>
       <div id="conversion-by-source"></div>
+    </div>
+
+    <div class="as-card" style="margin-bottom:20px;">
+      <p class="as-panel-title">Conversion rate trend</p>
+      <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">How the overall conversion rate has moved week to week — worth noting: this week's (and last week's) rate will typically look lower than older weeks, simply because those leads haven't had as much time to convert yet, not necessarily because they're worse.</p>
+      <div id="conversion-trend"></div>
     </div>
 
     <div class="as-card" style="margin-bottom:20px;">
@@ -419,17 +436,73 @@
     container.innerHTML = '<div class="as-daily-chart">' + bars + '</div><div class="as-daily-labels">' + labels + '</div>';
   }
 
+  // Per-table sort state, keyed by keyName ('source'/'campaign') — kept
+  // outside renderConversionTable so it survives across re-renders when
+  // the report data refreshes (a UTM filter change, say) without
+  // resetting back to the default sort every time.
+  var conversionTableState = {
+    source: { rows: [], sortMode: 'volume' },
+    campaign: { rows: [], sortMode: 'volume' },
+  };
+  var MIN_SAMPLE_FOR_RATE_SORT = 3;
+
+  function sortConversionRows(rows, sortMode) {
+    if (sortMode === 'volume') return rows.slice().sort(function (a, b) { return b.total - a.total; });
+    // Rate sort: only rows with enough sample size compete for the top
+    // spots — otherwise a single lead that happened to convert would
+    // show as "100%" and outrank a source with real, larger-sample
+    // performance. Below-threshold rows are still shown, just pushed
+    // to the bottom (sorted by volume among themselves) rather than
+    // hidden entirely.
+    var eligible = rows.filter(function (r) { return r.total >= MIN_SAMPLE_FOR_RATE_SORT; });
+    var ineligible = rows.filter(function (r) { return r.total < MIN_SAMPLE_FOR_RATE_SORT; });
+    eligible.sort(function (a, b) { return b.rate - a.rate; });
+    ineligible.sort(function (a, b) { return b.total - a.total; });
+    return eligible.concat(ineligible);
+  }
+
+  var CURRENCY_SYMBOLS = { GBP: '£', USD: '$', EUR: '€' };
+  function formatRevenue(wonRevenue) {
+    var currencies = Object.keys(wonRevenue || {});
+    if (!currencies.length) return '—';
+    return currencies
+      .map(function (c) {
+        var symbol = CURRENCY_SYMBOLS[c] || c + ' ';
+        return symbol + Math.round(wonRevenue[c]).toLocaleString();
+      })
+      .join(' + ');
+  }
+
+  function formatDaysToConvert(avgDays) {
+    if (avgDays === null || avgDays === undefined) return '—';
+    var rounded = Math.round(avgDays);
+    return rounded + (rounded === 1 ? ' day' : ' days');
+  }
+
   function renderConversionTable(container, rows, keyName, emptyMessage) {
+    conversionTableState[keyName].rows = rows;
+    var sortMode = conversionTableState[keyName].sortMode;
+
     if (!rows.length) {
       container.innerHTML = '<div class="as-empty">' + emptyMessage + '</div>';
       return;
     }
+    var sortedRows = sortConversionRows(rows, sortMode);
     var label = keyName === 'source' ? 'Source' : 'Campaign';
+
+    var toggleHtml =
+      '<div class="as-sort-toggle">' +
+      '<span class="as-sort-toggle-label">Sort by:</span>' +
+      '<button type="button" class="as-sort-btn' + (sortMode === 'volume' ? ' as-sort-btn-active' : '') + '" data-sort="volume">Volume</button>' +
+      '<button type="button" class="as-sort-btn' + (sortMode === 'rate' ? ' as-sort-btn-active' : '') + '" data-sort="rate" title="Sources/campaigns with fewer than ' + MIN_SAMPLE_FOR_RATE_SORT + ' prospects are excluded from the top ranking, to avoid a single lucky conversion looking like 100%">Rate</button>' +
+      '</div>';
+
     container.innerHTML =
+      toggleHtml +
       '<table class="as-table as-conversion-table"><thead><tr><th>' +
       label +
-      '</th><th>Prospects</th><th>Converted to Deal</th><th>Rate</th></tr></thead><tbody>' +
-      rows
+      '</th><th>Prospects</th><th>Converted to Deal</th><th>Rate</th><th>Won revenue</th><th>Avg. days to convert</th></tr></thead><tbody>' +
+      sortedRows
         .map(function (r) {
           var pct = Math.round(r.rate * 100);
           var rateClass = r.rate >= 0.2 ? ' as-rate-good' : '';
@@ -445,7 +518,11 @@
             rateClass +
             '">' +
             pct +
-            '%</td></tr>'
+            '%</td><td>' +
+            esc(formatRevenue(r.wonRevenue)) +
+            '</td><td>' +
+            esc(formatDaysToConvert(r.avgDaysToConvert)) +
+            '</td></tr>'
           );
         })
         .join('') +
@@ -455,6 +532,44 @@
         openProspectModal(row.getAttribute('data-filter-by'), row.getAttribute('data-filter-value'), row.getAttribute('data-filter-label'));
       });
     });
+    container.querySelectorAll('.as-sort-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        conversionTableState[keyName].sortMode = btn.getAttribute('data-sort');
+        renderConversionTable(container, conversionTableState[keyName].rows, keyName, emptyMessage);
+      });
+    });
+  }
+
+  // Same hand-rolled bar-chart approach as renderDailyChart (see its
+  // own doc comment for why — no charting dependency in this project),
+  // just showing conversion RATE per week instead of raw touchpoint
+  // volume.
+  function renderConversionTrend(container, rows) {
+    if (!rows.length || rows.every(function (r) { return r.total === 0; })) {
+      container.innerHTML = '<div class="as-empty">No data in the last 12 weeks yet.</div>';
+      return;
+    }
+    var bars = rows
+      .map(function (r) {
+        var pct = Math.round(r.rate * 100);
+        var heightPct = r.total > 0 ? Math.max(4, pct) : 0;
+        var d = new Date(r.weekStart + 'T00:00:00Z');
+        var label = 'Week of ' + (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ': ' + pct + '% (' + r.converted + ' of ' + r.total + ')';
+        return (
+          '<div class="as-daily-bar-wrap" title="' + label + '">' +
+          '<div class="as-daily-bar" style="height:' + heightPct + '%"></div>' +
+          '</div>'
+        );
+      })
+      .join('');
+    var labels = rows
+      .map(function (r, i) {
+        if (i % 2 !== 0 && i !== rows.length - 1) return '<span></span>';
+        var d = new Date(r.weekStart + 'T00:00:00Z');
+        return '<span>' + (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + '</span>';
+      })
+      .join('');
+    container.innerHTML = '<div class="as-daily-chart">' + bars + '</div><div class="as-daily-labels">' + labels + '</div>';
   }
 
   // Click-through drill-down: fetches the FULL matching prospect list
@@ -1147,6 +1262,7 @@
     renderBars(document.getElementById('first-touch-bars'), s.firstTouchChannelCounts);
     renderBars(document.getElementById('last-touch-bars'), s.lastTouchChannelCounts);
     renderConversionTable(document.getElementById('conversion-by-source'), s.conversionBySource, 'source', 'No data yet.');
+    renderConversionTrend(document.getElementById('conversion-trend'), s.conversionTrend);
     renderCampaigns(document.getElementById('campaigns-table'), s.topCampaigns);
     renderConversionTable(document.getElementById('campaign-performance'), s.campaignPerformance, 'campaign', 'No campaign data yet.');
     // Recently active prospects is deliberately NOT rendered from
