@@ -1,6 +1,6 @@
 import { db, Identity, Tenant, Touchpoint } from "../db";
 import { buildAttributionSummary, buildAttributionAsOf } from "./attribution";
-import { updatePersonCustomFields, updateDealCustomFields, createNote, createActivity } from "./pipedrive";
+import { updatePersonCustomFields, updateDealCustomFields, updateLeadCustomFields, createNote, createActivity } from "./pipedrive";
 import { journeyLinkUrl } from "./journey-link";
 
 /**
@@ -96,6 +96,94 @@ export async function syncPersonAttribution(tenant: Tenant, identity: Identity):
   } catch (err) {
     // Never let a Pipedrive sync failure break tracking ingestion.
     console.error(`[pipedrive-sync] syncPersonAttribution failed for tenant ${tenant.id}:`, err);
+  }
+}
+
+/**
+ * Freezes a permanent, one-time snapshot of "what drove this enquiry"
+ * onto a Lead's custom fields, the moment we first see it — the
+ * Lead-stage counterpart to freezeDealAttribution below, same
+ * freeze-once philosophy, just triggered by the Lead's own webhook
+ * instead of a Deal's. Called from routes/webhooks.ts's "lead" handler,
+ * guarded there by identity.leadCreatedAt already being set so this only
+ * ever runs once per identity — deliberately NOT re-run on every later
+ * Lead event (an edit, a stage change, being disregarded), and NOT
+ * re-run on every touchpoint the way syncPersonAttribution is. The whole
+ * point is a permanent record of the original source, not a living
+ * field — a Lead sitting open for weeks shouldn't have its "first touch"
+ * quietly drift as new unrelated activity happens.
+ *
+ * Reuses tenant.dealFieldMap rather than a separate Lead-specific field
+ * map, same reasoning as updateLeadCustomFields's doc comment: Leads and
+ * Deals share the same underlying custom-field definitions in Pipedrive,
+ * so the "AS: ... (at deal creation)" fields already show up on a Lead's
+ * detail panel — this just starts actually writing to them. If/when this
+ * Lead is later converted to a Deal, that's a separate, independent
+ * event: freezeDealAttribution fires fresh off the resulting deal.change
+ * webhook and recomputes "at deal creation" using this app's own
+ * touchpoint history as of THAT moment — it doesn't read anything back
+ * off the Lead's fields, so there's no dependency between the two freezes
+ * and no risk of one overwriting or being confused with the other.
+ */
+export async function freezeLeadAttribution(
+  tenant: Tenant,
+  params: {
+    leadId: string;
+    pipedrivePersonId: number;
+    leadCreatedAt: Date;
+  }
+): Promise<void> {
+  if (!tenant.pipedriveApiToken) return;
+  if (!tenant.dealFieldMap) return;
+
+  try {
+    const identity = await db.identity.findUnique({
+      where: { tenantId: tenant.id, pipedrivePersonId: params.pipedrivePersonId },
+    });
+    if (!identity) return;
+
+    const touchpoints = await db.touchpoint.findMany({
+      where: { tenantId: tenant.id, identityId: identity.id },
+      orderBy: { occurredAt: "asc" },
+    });
+    const summary = buildAttributionAsOf(touchpoints, params.leadCreatedAt);
+    if (!summary) return;
+
+    const firstTouchDate = new Date(summary.firstTouchDate);
+    const daysToCreate = Math.max(
+      0,
+      Math.round((params.leadCreatedAt.getTime() - firstTouchDate.getTime()) / (24 * 60 * 60 * 1000))
+    );
+
+    const m = tenant.dealFieldMap;
+    const fields: Record<string, string | number> = {
+      [m.deal_first_touch_channel]: summary.firstTouchChannel,
+      [m.deal_first_touch_source]: summary.firstTouchSource,
+      [m.deal_first_touch_campaign]: summary.firstTouchCampaign ?? "",
+      [m.deal_touchpoint_count]: summary.touchpointCount,
+      [m.deal_days_to_create]: daysToCreate,
+    };
+    setIfMapped(fields, m, "deal_first_touch_gclid", summary.firstTouchGclid);
+    setIfMapped(fields, m, "deal_first_touch_fbclid", summary.firstTouchFbclid);
+    setIfMapped(fields, m, "deal_first_touch_msclkid", summary.firstTouchMsclkid);
+    setIfMapped(fields, m, "deal_first_touch_referrer", summary.firstTouchReferrer);
+    setIfMapped(fields, m, "deal_first_touch_landing_page", summary.firstTouchLandingPage);
+    setIfMapped(fields, m, "deal_last_touch_gclid", summary.lastTouchGclid);
+    setIfMapped(fields, m, "deal_last_touch_fbclid", summary.lastTouchFbclid);
+    setIfMapped(fields, m, "deal_last_touch_msclkid", summary.lastTouchMsclkid);
+    setIfMapped(fields, m, "deal_last_touch_referrer", summary.lastTouchReferrer);
+    setIfMapped(fields, m, "deal_last_touch_landing_page", summary.lastTouchLandingPage);
+    setIfMapped(fields, m, "deal_first_touch_medium", summary.firstTouchMedium);
+    setIfMapped(fields, m, "deal_first_touch_term", summary.firstTouchTerm);
+    setIfMapped(fields, m, "deal_first_touch_content", summary.firstTouchContent);
+    setIfMapped(fields, m, "deal_last_touch_medium", summary.lastTouchMedium);
+    setIfMapped(fields, m, "deal_last_touch_term", summary.lastTouchTerm);
+    setIfMapped(fields, m, "deal_last_touch_content", summary.lastTouchContent);
+    const leadJourneyUrl = journeyLinkUrl(tenant, identity.id);
+    if (leadJourneyUrl) setIfMapped(fields, m, "deal_view_journey", leadJourneyUrl);
+    await updateLeadCustomFields(tenant.pipedriveApiToken, params.leadId, fields);
+  } catch (err) {
+    console.error(`[pipedrive-sync] freezeLeadAttribution failed for tenant ${tenant.id}:`, err);
   }
 }
 

@@ -60,6 +60,7 @@ async function init() {
       anonymousIds TEXT NOT NULL DEFAULT '',
       pipedrivePersonId INTEGER,
       pipedriveDealIds TEXT NOT NULL DEFAULT '',
+      pipedriveLeadIds TEXT NOT NULL DEFAULT '',
       firstSeenAt TEXT NOT NULL,
       lastSeenAt TEXT NOT NULL,
       UNIQUE(tenantId, email),
@@ -146,6 +147,23 @@ async function init() {
   ensureColumn("identities", "leadToDealTouchpoints", "INTEGER");
   ensureColumn("identities", "wonDealId", "INTEGER");
   ensureColumn("identities", "dealToWonTouchpoints", "INTEGER");
+  // Added when Lead-level (pre-Deal-conversion) attribution sync was
+  // built — see pipedrive-sync.ts's syncLeadAttribution and
+  // webhooks.ts's "lead" entity handler. Any tenant row created before
+  // this needs the column added via ALTER TABLE, same as the milestone
+  // columns above; ensureColumn handles that transparently.
+  ensureColumn("identities", "pipedriveLeadIds", "TEXT NOT NULL DEFAULT ''");
+  // The permanent freeze guard for Lead-source attribution — see
+  // pipedrive-sync.ts's freezeLeadAttribution. Once set, it marks "this
+  // identity's original enquiry source has already been captured
+  // forever" and nothing is allowed to overwrite it again, even if more
+  // Lead webhook events arrive later (e.g. the Lead being edited,
+  // disregarded, or a second Lead opened for the same contact) — that's
+  // the whole point: a "permanent source of the Lead," not a living
+  // field. Mirrors dealCreatedDealId/dealCreatedAt's role as both the
+  // milestone value and its own idempotency guard.
+  ensureColumn("identities", "leadCreatedAt", "TEXT");
+  ensureColumn("identities", "leadCreatedLeadId", "TEXT");
   // Billing (self-serve tenants only — see lib/stripe.ts,
   // routes/portal.ts's requireActiveBilling, and the README's "Billing"
   // section). NULL in the DB is resolved to a real default at read time
@@ -228,6 +246,17 @@ export interface Identity {
   anonymousIds: string;
   pipedrivePersonId: number | null;
   pipedriveDealIds: string;
+  // Comma-separated Lead IDs (Pipedrive Lead ids are UUID strings, not
+  // integers — unlike pipedriveDealIds/pipedrivePersonId above) this
+  // identity is linked to. A prospect can have more than one open Lead
+  // in principle, same reasoning as pipedriveDealIds being a list rather
+  // than a single value. See lib/pipedrive-sync.ts's syncLeadAttribution.
+  pipedriveLeadIds: string;
+  // Set exactly once, the first time we see any Lead webhook event for
+  // this identity — see pipedrive-sync.ts's freezeLeadAttribution. Null
+  // until then; never changes again afterward, by design.
+  leadCreatedAt: Date | null;
+  leadCreatedLeadId: string | null;
   firstSeenAt: Date;
   lastSeenAt: Date;
   // Deal-lifecycle milestones — see ensureColumn's doc comment above and
@@ -323,6 +352,9 @@ function rowToIdentity(row: any): Identity | null {
     anonymousIds: row.anonymousIds ?? "",
     pipedrivePersonId: row.pipedrivePersonId ?? null,
     pipedriveDealIds: row.pipedriveDealIds ?? "",
+    pipedriveLeadIds: row.pipedriveLeadIds ?? "",
+    leadCreatedAt: row.leadCreatedAt ? new Date(row.leadCreatedAt) : null,
+    leadCreatedLeadId: row.leadCreatedLeadId ?? null,
     firstSeenAt: new Date(row.firstSeenAt),
     lastSeenAt: new Date(row.lastSeenAt),
     dealCreatedDealId: row.dealCreatedDealId ?? null,
@@ -626,12 +658,13 @@ export const db = {
           anonymousIds: data.anonymousIds ?? "",
           pipedrivePersonId: data.pipedrivePersonId ?? null,
           pipedriveDealIds: data.pipedriveDealIds ?? "",
+          pipedriveLeadIds: data.pipedriveLeadIds ?? "",
           firstSeenAt: now,
           lastSeenAt: now,
         };
         sqlite.run(
-          `INSERT INTO identities (id, tenantId, email, anonymousIds, pipedrivePersonId, pipedriveDealIds, firstSeenAt, lastSeenAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO identities (id, tenantId, email, anonymousIds, pipedrivePersonId, pipedriveDealIds, pipedriveLeadIds, firstSeenAt, lastSeenAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             row.id,
             row.tenantId,
@@ -639,6 +672,7 @@ export const db = {
             row.anonymousIds,
             row.pipedrivePersonId,
             row.pipedriveDealIds,
+            row.pipedriveLeadIds,
             row.firstSeenAt,
             row.lastSeenAt,
           ]
@@ -664,12 +698,13 @@ export const db = {
           lastSeenAt: (data.lastSeenAt as Date | undefined)?.toISOString?.() ?? new Date().toISOString(),
         };
         sqlite.run(
-          `UPDATE identities SET email = ?, anonymousIds = ?, pipedrivePersonId = ?, pipedriveDealIds = ?, lastSeenAt = ? WHERE tenantId = ? AND id = ?`,
+          `UPDATE identities SET email = ?, anonymousIds = ?, pipedrivePersonId = ?, pipedriveDealIds = ?, pipedriveLeadIds = ?, lastSeenAt = ? WHERE tenantId = ? AND id = ?`,
           [
             merged.email,
             merged.anonymousIds,
             merged.pipedrivePersonId,
             merged.pipedriveDealIds,
+            merged.pipedriveLeadIds,
             merged.lastSeenAt,
             where.tenantId,
             where.id,
@@ -682,6 +717,36 @@ export const db = {
 
     // Separate from the general update() above deliberately — this
     // writes a distinct set of columns (the deal-lifecycle milestones)
+    // Same idempotency/no-lastSeenAt-bump reasoning as setDealMilestone
+    // below — this is a one-time freeze triggered by a Pipedrive webhook,
+    // not a genuine new visitor touch. See webhooks.ts's "lead" handler,
+    // the only call site.
+    setLeadMilestone({
+      where,
+      data,
+    }: {
+      where: { tenantId: string; id: string };
+      data: Partial<Pick<Identity, "leadCreatedAt" | "leadCreatedLeadId">>;
+    }) {
+      return withDb(() => {
+        const existing = queryOne("SELECT * FROM identities WHERE tenantId = ? AND id = ?", [where.tenantId, where.id]);
+        if (!existing) throw new Error(`Identity ${where.id} not found for tenant ${where.tenantId}`);
+        const definedData = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
+        const merged = { ...existing, ...definedData };
+        const leadCreatedAtIso = (merged.leadCreatedAt as Date | string | null)
+          ? new Date(merged.leadCreatedAt as Date | string).toISOString()
+          : null;
+        sqlite.run(`UPDATE identities SET leadCreatedAt = ?, leadCreatedLeadId = ? WHERE tenantId = ? AND id = ?`, [
+          leadCreatedAtIso,
+          merged.leadCreatedLeadId ?? null,
+          where.tenantId,
+          where.id,
+        ]);
+        persist();
+        return rowToIdentity({ ...merged, leadCreatedAt: leadCreatedAtIso })!;
+      });
+    },
+
     // and, unlike update(), does NOT bump lastSeenAt: a milestone write
     // happens on a Pipedrive webhook, not a genuine new visitor touch, so
     // stamping "last seen" here would be misleading. See webhooks.ts's

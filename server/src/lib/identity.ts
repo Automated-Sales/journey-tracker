@@ -88,6 +88,7 @@ export async function mergeIdentities(
     anonymousId?: string | null;
     pipedrivePersonId?: number | null;
     pipedriveDealId?: number | null;
+    pipedriveLeadId?: string | null;
   }
 ) {
   const tenantId = tenant.id;
@@ -150,6 +151,14 @@ export async function mergeIdentities(
   );
   if (params.pipedriveDealId) mergedDealIds.add(String(params.pipedriveDealId));
 
+  const mergedLeadIds = new Set(
+    primary.pipedriveLeadIds ? primary.pipedriveLeadIds.split(",").filter(Boolean) : []
+  );
+  if (params.pipedriveLeadId) mergedLeadIds.add(params.pipedriveLeadId);
+  for (const dup of duplicates) {
+    dup.pipedriveLeadIds.split(",").filter(Boolean).forEach((id) => mergedLeadIds.add(id));
+  }
+
   primary = await db.identity.update({
     where: { tenantId, id: primary.id },
     data: {
@@ -157,6 +166,7 @@ export async function mergeIdentities(
       pipedrivePersonId: params.pipedrivePersonId ?? primary.pipedrivePersonId ?? undefined,
       anonymousIds: Array.from(mergedAnonymousIds).join(","),
       pipedriveDealIds: Array.from(mergedDealIds).join(","),
+      pipedriveLeadIds: Array.from(mergedLeadIds).join(","),
       lastSeenAt: new Date(),
     },
   });
@@ -195,6 +205,12 @@ export async function recordTouchpoint(tenant: Tenant, tp: RawTouchpoint) {
   // event wait on a round trip to Pipedrive. syncPersonAttribution never
   // throws (it catches and logs internally), this .catch is just a backstop.
   void syncPersonAttribution(tenant, identity).catch((err) => console.error("[recordTouchpoint] sync failed:", err));
+
+  // Deliberately NOT also re-syncing any linked Lead here (unlike
+  // Person, above) — freezeLeadAttribution (pipedrive-sync.ts) is a
+  // permanent, one-time snapshot taken the moment the Lead is first
+  // seen, not a living field that should keep drifting as later,
+  // possibly unrelated touchpoints accumulate. See its doc comment.
 
   return { identity, touchpoint };
 }

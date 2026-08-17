@@ -266,3 +266,32 @@ export async function updateDealCustomFields(
     body: JSON.stringify({ custom_fields }),
   });
 }
+
+// Leads are a genuinely separate Pipedrive object from Deals — their own
+// endpoint, their own id format (a UUID string, not an integer like
+// Person/Deal ids) — even though the Deal custom fields we create also
+// show up on a Lead's detail panel in Pipedrive's UI, because Leads and
+// Deals share the same underlying custom-field *definitions*. That
+// shared-definition behavior is what lets syncLeadAttribution reuse
+// tenant.dealFieldMap rather than needing a separate field-creation step
+// for Leads. As of this writing, Leads haven't been migrated to
+// Pipedrive's v2 API the way Person/Deal have, so this uses v1 — and
+// unlike Person/Deal's v2 endpoints (which wrap custom field values in a
+// nested `custom_fields` object), a live test against Johari's account
+// confirmed Leads reject that wrapper outright ("custom_fields" is not
+// allowed) and expect each custom field key as a flat top-level property
+// instead — the older v1-style convention that Person/Deal used before
+// v2 existed.
+export async function updateLeadCustomFields(
+  token: string,
+  leadId: string,
+  values: Record<string, string | number>
+) {
+  const body = toCustomFieldsPayload(values);
+  if (Object.keys(body).length === 0) return null;
+  return pdFetchV1(token, `/leads/${leadId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}

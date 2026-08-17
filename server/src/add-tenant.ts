@@ -117,7 +117,14 @@ on by default).\n`);
   console.log("4. PIPEDRIVE WEBHOOK — Settings > Tools and apps > Webhooks:");
   console.log("=".repeat(70));
   console.log(`URL: ${baseUrl}/t/${tenant.id}/webhooks/pipedrive?secret=${tenant.webhookSecret}
-Subscribe to: person.create, person.change, deal.change, activity.create, note.create\n`);
+Subscribe to: person.create, person.change, deal.change, activity.create, note.create,
+lead.create, lead.change
+
+(Lead events are needed for attribution to appear on a Lead before it's
+converted to a Deal — added ${new Date().toISOString().slice(0, 10)}. In Pipedrive's
+webhook UI this may show as ticking "Lead" under Event objects rather
+than typing an event name directly; unverified against a live account,
+see webhooks.ts's "lead" entity handler doc comment if it doesn't fire.)\n`);
 
   if (tenant.pipedriveApiToken) {
     console.log("=".repeat(70));

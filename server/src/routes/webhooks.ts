@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "../db";
 import { recordTouchpoint, mergeIdentities } from "../lib/identity";
-import { freezeDealAttribution, syncPersonAttribution, syncDealMilestoneField } from "../lib/pipedrive-sync";
+import { freezeDealAttribution, syncPersonAttribution, freezeLeadAttribution, syncDealMilestoneField } from "../lib/pipedrive-sync";
 import { requireTenant, requireTenantSecret } from "./tenant-middleware";
 import { getDeal } from "../lib/pipedrive";
 import { countTouchpointsUpTo, countTouchpointsBetween } from "../lib/deal-milestones";
@@ -342,6 +342,48 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
             });
             await syncDealMilestoneField(tenant, data.id, "deal_deal_to_won_touchpoints", dealToWonTouchpoints);
           }
+        }
+      }
+      return res.json({ ok: true });
+    }
+
+    // LEAD — the pre-Deal-conversion object. Deliberately unverified
+    // against a live account (same caution as setup-pipedrive-fields.ts
+    // and updateLeadCustomFields): the exact webhook payload shape for
+    // Lead events, and even the field name Pipedrive expects for "Event
+    // objects" in its webhook UI, came from documentation rather than a
+    // confirmed live test.
+    //
+    // Captures a PERMANENT source snapshot the first time we ever see
+    // this identity's Lead — guarded purely by identity.leadCreatedAt
+    // already being set, deliberately NOT by inspecting the webhook's
+    // action name ("added"/"create"/"updated"/etc, the way the Deal
+    // handler below does): since we're not confident exactly which
+    // action strings Pipedrive sends for Leads, checking "has this
+    // identity ever been frozen before" is a simpler, more robust guard
+    // that doesn't depend on getting that naming right. The practical
+    // effect: whichever Lead webhook event (create OR change) happens to
+    // arrive FIRST for a given identity is the one that freezes the
+    // source — normally that's the genuine creation event anyway, since
+    // it's almost always first. A later "change" event for the same
+    // already-frozen identity is a no-op here by design (see
+    // freezeLeadAttribution's doc comment for why it must stay
+    // permanent), but the identity<->Lead link itself (pipedriveLeadIds,
+    // via mergeIdentities) still gets recorded every time regardless.
+    if (entity === "lead") {
+      const personId = data.person_id?.value || data.person_id;
+      if (personId && data.id) {
+        const identity = await mergeIdentities(tenant, {
+          pipedrivePersonId: personId,
+          pipedriveLeadId: String(data.id),
+        });
+        if (!identity.leadCreatedAt) {
+          const leadCreatedAt = data.add_time ? new Date(data.add_time) : new Date();
+          await db.identity.setLeadMilestone({
+            where: { tenantId: tenant.id, id: identity.id },
+            data: { leadCreatedAt, leadCreatedLeadId: String(data.id) },
+          });
+          await freezeLeadAttribution(tenant, { leadId: String(data.id), pipedrivePersonId: personId, leadCreatedAt });
         }
       }
       return res.json({ ok: true });
