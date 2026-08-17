@@ -41,7 +41,12 @@ function toCsv(headers: string[], rows: (string | number | null | undefined)[][]
  * Pipedrive column link. Still a pure function: this is just a plain
  * string input, no I/O happens in here.
  */
-export function buildProspectsCsv(identities: Identity[], touchpoints: Touchpoint[], companyDomain: string | null = null): string {
+export function buildProspectsCsv(
+  identities: Identity[],
+  touchpoints: Touchpoint[],
+  companyDomain: string | null = null,
+  includeAnonymous: boolean = true
+): string {
   const byIdentity = new Map<string, Touchpoint[]>();
   for (const tp of touchpoints) {
     if (!tp.identityId) continue;
@@ -59,6 +64,10 @@ export function buildProspectsCsv(identities: Identity[], touchpoints: Touchpoin
 
   const rows: (string | number | null)[][] = [];
   for (const identity of sortedIdentities) {
+    // Matches the dashboard table's "(anonymous)" definition exactly —
+    // same field, same truthiness check — so the CSV and the on-screen
+    // toggle never disagree about which rows count as anonymous.
+    if (!includeAnonymous && !identity.email) continue;
     const tps = (byIdentity.get(identity.id) ?? []).slice().sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
     const summary = buildAttributionSummary(tps);
     if (!summary) continue;

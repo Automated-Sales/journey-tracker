@@ -322,13 +322,18 @@ portalRouter.post("/api/settings/visit-logging", requireSession, requireActiveBi
  */
 portalRouter.get("/api/export/prospects.csv", requireSession, requireActiveBilling, async (req, res) => {
   const tenant = req.portalTenant!;
+  // Defaults to true (include everyone) so any link/bookmark without the
+  // param keeps its old, pre-toggle behavior — the dashboard's own
+  // download link explicitly appends ?anonymous=0/1 based on the "Show
+  // anonymous" checkbox state, see dashboard.html.
+  const includeAnonymous = req.query.anonymous !== "0";
   const [identities, touchpoints] = await Promise.all([
     db.identity.findMany({ where: { tenantId: tenant.id } }),
     db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
   ]);
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="prospects.csv"');
-  res.send(buildProspectsCsv(identities, touchpoints, tenant.pipedriveCompanyDomain));
+  res.send(buildProspectsCsv(identities, touchpoints, tenant.pipedriveCompanyDomain, includeAnonymous));
 });
 
 portalRouter.get("/api/export/campaigns.csv", requireSession, requireActiveBilling, async (req, res) => {

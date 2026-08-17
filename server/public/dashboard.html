@@ -173,9 +173,12 @@
     <div class="as-card">
       <div class="as-panel-head">
         <p class="as-panel-title">Recently active prospects</p>
-        <div style="display:flex; gap:8px;">
+        <div style="display:flex; gap:8px; align-items:center;">
+          <label class="as-columns-check" style="font-size:13px; color:#555;">
+            <input type="checkbox" id="recent-show-anonymous-toggle" /> Show anonymous
+          </label>
           <button type="button" class="as-export-link" id="recent-columns-btn">Columns</button>
-          <a class="as-export-link" href="/api/export/prospects.csv">Download CSV</a>
+          <a class="as-export-link" id="recent-download-csv" href="/api/export/prospects.csv">Download CSV</a>
         </div>
       </div>
       <div id="recent-columns-panel" class="as-columns-panel" style="display:none;"></div>
@@ -386,14 +389,57 @@
   }
 
   var recentColumnPrefs = loadColumnPrefs();
-  var lastRecentRows = []; // cached so a column-pref change can re-render without refetching
+  var lastRecentRows = []; // cached so a column-pref/anonymous-filter change can re-render without refetching
+
+  // Same persistence approach as column prefs: a per-browser display
+  // preference, not tenant data, so localStorage is the right place for
+  // it. Defaults to hidden (anonymous visits are the vast majority of
+  // rows and usually just noise for a rep scanning this table) — a
+  // visitor who wants to see raw traffic volume can flip it back on, and
+  // that choice sticks across reloads.
+  var RECENT_SHOW_ANONYMOUS_KEY = 'as_dashboard_show_anonymous_v1';
+
+  function loadShowAnonymousPref() {
+    try {
+      return localStorage.getItem(RECENT_SHOW_ANONYMOUS_KEY) === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function saveShowAnonymousPref(value) {
+    try {
+      localStorage.setItem(RECENT_SHOW_ANONYMOUS_KEY, value ? '1' : '0');
+    } catch (e) {
+      // Private browsing / storage disabled — fine to just not persist.
+    }
+  }
+
+  var showAnonymous = loadShowAnonymousPref();
+
+  // Keeps the Download CSV link's query string in sync with the toggle,
+  // so the export always matches what's currently on screen without
+  // needing a fetch+blob download flow — a plain <a href> with the right
+  // query string is simpler and still gets the browser's native download
+  // UI/progress for free.
+  function updateCsvExportLink() {
+    var link = document.getElementById('recent-download-csv');
+    if (link) link.href = '/api/export/prospects.csv?anonymous=' + (showAnonymous ? '1' : '0');
+  }
 
   function renderRecent(container, rows) {
     lastRecentRows = rows;
+    var visibleRows = showAnonymous ? rows : rows.filter(function (r) { return !!r.email; });
+
     if (!rows.length) {
       container.innerHTML = '<div class="as-empty">No prospects identified yet.</div>';
       return;
     }
+    if (!visibleRows.length) {
+      container.innerHTML = '<div class="as-empty">All recent activity so far is from anonymous visitors — check "Show anonymous" above to see it.</div>';
+      return;
+    }
+    rows = visibleRows;
     var visibleColumns = recentColumnPrefs.order
       .filter(function (k) { return recentColumnPrefs.hidden.indexOf(k) === -1; })
       .map(function (k) { return RECENT_COLUMNS_BY_KEY[k]; })
@@ -773,6 +819,16 @@
       recentColumnsPanelRendered = true;
     }
     panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  });
+
+  var showAnonymousToggle = document.getElementById('recent-show-anonymous-toggle');
+  showAnonymousToggle.checked = showAnonymous;
+  updateCsvExportLink();
+  showAnonymousToggle.addEventListener('change', function () {
+    showAnonymous = showAnonymousToggle.checked;
+    saveShowAnonymousPref(showAnonymous);
+    updateCsvExportLink();
+    renderRecent(document.getElementById('recent-table'), lastRecentRows);
   });
 
   load().catch(function () {
