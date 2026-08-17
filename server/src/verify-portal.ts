@@ -18,7 +18,7 @@ import "dotenv/config";
 import { db } from "./db";
 import { hashPassword, verifyPassword } from "./lib/auth";
 import { validateSignupForm, provisionSelfServeTenant } from "./lib/portal-signup";
-import { buildPortalSummary } from "./lib/portal-summary";
+import { buildPortalSummary, filterProspects, filterIdentities } from "./lib/portal-summary";
 import { buildProspectsCsv, buildCampaignsCsv } from "./lib/csv";
 import { Identity, Touchpoint } from "./db";
 
@@ -190,6 +190,134 @@ async function main() {
 
   const emptySummary = buildPortalSummary([], []);
   assert(emptySummary.totalIdentities === 0 && emptySummary.recent.length === 0, "buildPortalSummary: empty input doesn't throw, returns zeroed summary");
+
+  // --- conversion / funnel / daily-volume additions ---------------------
+  // Reuses idA/idB/tps from above, but marks idA as having converted to a
+  // Deal (and having reached Lead stage first) so there's something
+  // real to compute a non-trivial rate/funnel against. idA's first touch
+  // (chronologically earliest touchpoint) is the linkedin_ads ad_click
+  // with campaign "Q1-launch"; idB's first touch is the mailchimp
+  // email_click, which also happens to carry campaign "Q1-launch" —
+  // deliberately reusing the same campaign on both so campaignPerformance
+  // has a real total>1 group to compute a rate against, the same way
+  // topCampaigns' own test above relies on this fixture's overlap.
+  const idAConverted = fixtureIdentity({
+    id: "idA",
+    email: "a@example.com",
+    lastSeenAt: new Date("2026-01-10"),
+    leadCreatedAt: new Date("2026-01-02"),
+    leadCreatedLeadId: "lead-1",
+    dealCreatedDealId: 501,
+  });
+  const convSummary = buildPortalSummary([idAConverted, idB, idC], tps);
+
+  assert(
+    convSummary.conversionBySource.find((c) => c.source === "linkedin_ads")?.total === 1 &&
+      convSummary.conversionBySource.find((c) => c.source === "linkedin_ads")?.converted === 1 &&
+      convSummary.conversionBySource.find((c) => c.source === "linkedin_ads")?.rate === 1,
+    "conversionBySource: idA's first-touch source (linkedin_ads) shows 1/1 converted, rate 1"
+  );
+  assert(
+    convSummary.conversionBySource.find((c) => c.source === "mailchimp")?.converted === 0 &&
+      convSummary.conversionBySource.find((c) => c.source === "mailchimp")?.rate === 0,
+    "conversionBySource: idB's first-touch source (mailchimp) shows 0 converted, rate 0 — never marked as having a Deal"
+  );
+  assert(
+    convSummary.campaignPerformance.find((c) => c.campaign === "Q1-launch")?.total === 2 &&
+      convSummary.campaignPerformance.find((c) => c.campaign === "Q1-launch")?.converted === 1 &&
+      convSummary.campaignPerformance.find((c) => c.campaign === "Q1-launch")?.rate === 0.5,
+    "campaignPerformance: Q1-launch grouped by first-touch campaign (both idA and idB) shows 1/2 converted, rate 0.5 — distinct from topCampaigns' touchpoint-count of 2 for the same label"
+  );
+  assert(
+    convSummary.funnel.map((f) => f.stage).join(",") === "Total tracked,Identified,Lead created,Deal created,Won",
+    "funnel: stages are in the expected fixed order"
+  );
+  assert(
+    convSummary.funnel.find((f) => f.stage === "Total tracked")?.count === 3 &&
+      convSummary.funnel.find((f) => f.stage === "Identified")?.count === 2 &&
+      convSummary.funnel.find((f) => f.stage === "Lead created")?.count === 1 &&
+      convSummary.funnel.find((f) => f.stage === "Deal created")?.count === 1 &&
+      convSummary.funnel.find((f) => f.stage === "Won")?.count === 0,
+    "funnel: counts narrow correctly at each stage (only idA reached Lead/Deal, nobody's Won yet)"
+  );
+
+  const recentTp = fixtureTouchpoint({ identityId: "idA", channel: "website_visit", occurredAt: new Date() });
+  const dayVolumeSummary = buildPortalSummary([idAConverted, idB, idC], [...tps, recentTp]);
+  assert(dayVolumeSummary.touchpointsByDay.length === 30, "touchpointsByDay: always returns exactly 30 zero-filled days, not just days with activity");
+  assert(
+    dayVolumeSummary.touchpointsByDay[29].count >= 1,
+    "touchpointsByDay: a touchpoint occurring right now lands in the final (today's) bucket"
+  );
+  assert(
+    dayVolumeSummary.touchpointsByDay.every((d, i) => i === 0 || dayVolumeSummary.touchpointsByDay[i - 1].date < d.date),
+    "touchpointsByDay: days are in strictly ascending order"
+  );
+  assert(
+    tps.every((tp) => dayVolumeSummary.touchpointsByDay.reduce((sum, d) => sum + d.count, 0) >= 1),
+    "touchpointsByDay: the recent touchpoint is actually counted somewhere in the 30-day window"
+  );
+
+  // --- filterProspects (dashboard drill-down) ---------------------------
+  const bySource = filterProspects([idAConverted, idB, idC], tps, { type: "source", value: "linkedin_ads" });
+  assert(
+    bySource.length === 1 && bySource[0].identityId === "idA",
+    "filterProspects: filtering by source returns only the identity whose first touch matches, not both"
+  );
+
+  const byCampaign = filterProspects([idAConverted, idB, idC], tps, { type: "campaign", value: "Q1-launch" });
+  assert(
+    byCampaign.length === 2 && byCampaign[0].identityId === "idB" && byCampaign[1].identityId === "idA",
+    "filterProspects: filtering by campaign returns both matching identities, sorted most-recently-seen first (same order as the default recent list)"
+  );
+
+  const byLeadFunnel = filterProspects([idAConverted, idB, idC], tps, { type: "funnel", value: "lead" });
+  assert(
+    byLeadFunnel.length === 1 && byLeadFunnel[0].identityId === "idA",
+    "filterProspects: funnel filter 'lead' returns only the identity with leadCreatedAt set"
+  );
+
+  const byTotalFunnel = filterProspects([idAConverted, idB, idC], tps, { type: "funnel", value: "total" });
+  assert(
+    byTotalFunnel.length === 2,
+    "filterProspects: funnel filter 'total' still excludes identities with zero touchpoints (idC) — there's no journey to show for them, same exclusion rule buildPortalSummary's own recent list already applies"
+  );
+
+  const identitiesBySource = filterIdentities([idAConverted, idB, idC], tps, { type: "source", value: "linkedin_ads" });
+  assert(
+    identitiesBySource.length === 1 && identitiesBySource[0].id === "idA",
+    "filterIdentities: returns the raw Identity row (not a RecentProspect), for the CSV export route to feed into buildProspectsCsv"
+  );
+
+  // --- UTM filter (segments every report, not just the drill-down) ------
+  const utmFilteredSummary = buildPortalSummary([idAConverted, idB, idC], tps, { source: "linkedin_ads" });
+  assert(
+    utmFilteredSummary.totalIdentities === 1 && utmFilteredSummary.identifiedIdentities === 1,
+    "buildPortalSummary: an active UTM filter narrows totalIdentities/identifiedIdentities to just the matching cohort (idA), not the whole tenant"
+  );
+  assert(
+    utmFilteredSummary.funnel.find((f) => f.stage === "Total tracked")?.count === 1,
+    "buildPortalSummary: the funnel's own 'Total tracked' stage reflects the UTM-filtered cohort too, not the unfiltered total"
+  );
+  assert(
+    utmFilteredSummary.recent.length === 1 && utmFilteredSummary.recent[0].identityId === "idA",
+    "buildPortalSummary: recent list is restricted to the UTM-matching cohort"
+  );
+  assert(
+    utmFilteredSummary.distinctUtmValues.sources.includes("mailchimp"),
+    "buildPortalSummary: distinctUtmValues always reflects the FULL unfiltered data (includes idB's source even though idB itself was filtered out of every other field)"
+  );
+
+  const unfilteredSummary = buildPortalSummary([idAConverted, idB, idC], tps);
+  assert(
+    unfilteredSummary.totalIdentities === 3,
+    "buildPortalSummary: with no utmFilter argument at all, totalIdentities is unchanged from before this feature existed (backward compatible)"
+  );
+
+  const utmFilteredBySource = filterProspects([idAConverted, idB, idC], tps, { type: "funnel", value: "total" }, { source: "linkedin_ads" });
+  assert(
+    utmFilteredBySource.length === 1 && utmFilteredBySource[0].identityId === "idA",
+    "filterProspects: a UTM filter composes with a ProspectFilter (funnel/source/campaign click) — both apply together, not either/or"
+  );
 
   // --- CSV export (uncapped — unlike buildPortalSummary's top 25/10) ---
   const prospectsCsv = buildProspectsCsv([idA, idB, idC], tps);

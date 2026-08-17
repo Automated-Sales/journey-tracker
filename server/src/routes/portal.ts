@@ -3,7 +3,7 @@ import { db, Tenant, Touchpoint } from "../db";
 import { getMe, deepLinkForPerson } from "../lib/pipedrive";
 import { setupPipedriveFields } from "../lib/pipedrive-field-setup";
 import { validateSignupForm, provisionSelfServeTenant } from "../lib/portal-signup";
-import { buildPortalSummary } from "../lib/portal-summary";
+import { buildPortalSummary, filterProspects, filterIdentities, ProspectFilter, UtmFilter } from "../lib/portal-summary";
 import { buildProspectsCsv, buildCampaignsCsv } from "../lib/csv";
 import { verifyJourneyToken } from "../lib/journey-link";
 import { createCheckoutSession, createBillingPortalSession, stripeConfigured, isBillingActive } from "../lib/stripe";
@@ -331,9 +331,17 @@ portalRouter.get("/api/export/prospects.csv", requireSession, requireActiveBilli
     db.identity.findMany({ where: { tenantId: tenant.id } }),
     db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
   ]);
+  // Routed through filterIdentities with the neutral "total" funnel
+  // filter (matches every identity, same as no filter at all) purely so
+  // an active UTM filter still applies — when parseUtmFilterQuery
+  // returns an empty filter (the common case, no UTM params on this
+  // request), matchesUtmFilter always returns true and this is exactly
+  // equivalent to using the raw `identities` array, so this doesn't
+  // change behavior for the default, unfiltered "Download CSV" click.
+  const matched = filterIdentities(identities, touchpoints, { type: "funnel", value: "total" }, parseUtmFilterQuery(req));
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="prospects.csv"');
-  res.send(buildProspectsCsv(identities, touchpoints, tenant.pipedriveCompanyDomain, includeAnonymous));
+  res.send(buildProspectsCsv(matched, touchpoints, tenant.pipedriveCompanyDomain, includeAnonymous));
 });
 
 portalRouter.get("/api/export/campaigns.csv", requireSession, requireActiveBilling, async (req, res) => {
@@ -344,13 +352,33 @@ portalRouter.get("/api/export/campaigns.csv", requireSession, requireActiveBilli
   res.send(buildCampaignsCsv(touchpoints));
 });
 
+// Shared by /api/summary, /api/prospects/filtered, and
+// /api/export/prospects-filtered.csv — the global UTM filter bar's
+// ?utm_source=/?utm_medium=/?utm_campaign=/?utm_term=/?utm_content=
+// query params, parsed the same way everywhere so a filtered dashboard
+// and its drill-down popups/exports can never silently disagree about
+// which segment is active. Prefixed utm_ (unlike ?by=/?value= above) to
+// avoid colliding with the drill-down's own ?value= param when both are
+// present on the same request (a funnel-stage click while a UTM filter
+// is already active hits /api/prospects/filtered with both sets of
+// params at once).
+function parseUtmFilterQuery(req: Request): UtmFilter {
+  const filter: UtmFilter = {};
+  if (req.query.utm_source) filter.source = String(req.query.utm_source);
+  if (req.query.utm_medium) filter.medium = String(req.query.utm_medium);
+  if (req.query.utm_campaign) filter.campaign = String(req.query.utm_campaign);
+  if (req.query.utm_term) filter.term = String(req.query.utm_term);
+  if (req.query.utm_content) filter.content = String(req.query.utm_content);
+  return filter;
+}
+
 portalRouter.get("/api/summary", requireSession, requireActiveBilling, async (req, res) => {
   const tenant = req.portalTenant!;
   const [identities, touchpoints] = await Promise.all([
     db.identity.findMany({ where: { tenantId: tenant.id } }),
     db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
   ]);
-  const summary = buildPortalSummary(identities, touchpoints);
+  const summary = buildPortalSummary(identities, touchpoints, parseUtmFilterQuery(req));
   // Attach the actual clickable Pipedrive link here, not in
   // buildPortalSummary — that function stays a pure, tenant-domain-agnostic
   // unit (see verify-portal.ts), while only this route knows the tenant's
@@ -362,6 +390,88 @@ portalRouter.get("/api/summary", requireSession, requireActiveBilling, async (re
       : null,
   }));
   res.json({ ...summary, recent: recentWithLinks });
+});
+
+const FUNNEL_VALUES = ["total", "identified", "lead", "deal", "won"];
+
+// Shared by /api/prospects/filtered (JSON, for the dashboard popup) and
+// /api/export/prospects-filtered.csv (the popup's Download CSV button)
+// below — one parsing/validation implementation so the two routes can
+// never interpret the same ?by=/?value= pair differently.
+function parseProspectFilterQuery(req: Request): ProspectFilter | { error: string } {
+  const by = String(req.query.by || "");
+  const value = String(req.query.value ?? "");
+  if (!value) return { error: "value is required" };
+
+  if (by === "funnel") {
+    if (!FUNNEL_VALUES.includes(value)) return { error: `value must be one of: ${FUNNEL_VALUES.join(", ")}` };
+    return { type: "funnel", value: value as "total" | "identified" | "lead" | "deal" | "won" };
+  }
+  if (by === "source") return { type: "source", value };
+  if (by === "campaign") return { type: "campaign", value };
+  return { error: "by must be one of: funnel, source, campaign" };
+}
+
+/**
+ * Powers the dashboard's click-through drill-down (funnel stages,
+ * conversion-by-source rows, campaign-performance rows) — see
+ * lib/portal-summary.ts's filterProspects for why this recomputes from
+ * the full identity list rather than reusing /api/summary's own
+ * (25-capped) `recent` array. Query params:
+ *   ?by=funnel&value=lead|deal|won|identified|total
+ *   ?by=source&value=<exact firstTouchSource string>
+ *   ?by=campaign&value=<exact firstTouchCampaign string>
+ */
+portalRouter.get("/api/prospects/filtered", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const filter = parseProspectFilterQuery(req);
+  if ("error" in filter) return res.status(400).json({ error: filter.error });
+  const utmFilter = parseUtmFilterQuery(req);
+
+  const [identities, touchpoints] = await Promise.all([
+    db.identity.findMany({ where: { tenantId: tenant.id } }),
+    db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
+  ]);
+  const prospects = filterProspects(identities, touchpoints, filter, utmFilter);
+  // Same pipedriveUrl attachment as /api/summary above, kept consistent
+  // so the filtered table can render with identical "Pipedrive" column
+  // links.
+  const prospectsWithLinks = prospects.map((r) => ({
+    ...r,
+    pipedriveUrl: r.pipedrivePersonId ? deepLinkForPerson(tenant.pipedriveCompanyDomain, r.pipedrivePersonId) : null,
+  }));
+  res.json({ prospects: prospectsWithLinks });
+});
+
+/**
+ * The popup's "Download CSV" button — same filter query params as
+ * /api/prospects/filtered above, plus the same ?anonymous=0/1 the main
+ * export already supports (see /api/export/prospects.csv), so the
+ * popup's own "Show anonymous" toggle controls this export the same way
+ * it controls the on-screen table. Returns the actual downloadable file
+ * (reusing buildProspectsCsv, the exact same function/format the main
+ * "Download CSV" button under Recently active prospects already uses)
+ * instead of JSON. Deliberately CSV, not a true .xlsx binary: this app
+ * has no spreadsheet-writing dependency, and a .csv opens directly in
+ * Excel with a double-click on every platform, so there's no real
+ * functionality gap — just avoids adding a new dependency for something
+ * a plain-text format already covers.
+ */
+portalRouter.get("/api/export/prospects-filtered.csv", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const filter = parseProspectFilterQuery(req);
+  if ("error" in filter) return res.status(400).json({ error: filter.error });
+  const includeAnonymous = req.query.anonymous !== "0";
+  const utmFilter = parseUtmFilterQuery(req);
+
+  const [identities, touchpoints] = await Promise.all([
+    db.identity.findMany({ where: { tenantId: tenant.id } }),
+    db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
+  ]);
+  const matched = filterIdentities(identities, touchpoints, filter, utmFilter);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="prospects-filtered.csv"');
+  res.send(buildProspectsCsv(matched, touchpoints, tenant.pipedriveCompanyDomain, includeAnonymous));
 });
 
 /**

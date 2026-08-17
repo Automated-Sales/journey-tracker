@@ -94,14 +94,14 @@
     <div class="as-card as-install-card" style="margin-bottom:28px;">
       <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Sync attribution back to Pipedrive</h3>
       <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
-        Tracking and this dashboard work on their own, but writing the journey onto a Person or Deal's custom fields in Pipedrive needs one more thing: a webhook, so Pipedrive tells us the moment a Person or Deal exists.
+        Tracking and this dashboard work on their own, but writing the journey onto a Person, Lead, or Deal's custom fields in Pipedrive needs one more thing: a webhook, so Pipedrive tells us the moment one of those exists.
       </p>
       <p style="background:#fdf6e8; border:1px solid #f0dfae; color:#7a5c12; border-radius:10px; padding:12px 14px; font-size:13px; margin:0 0 16px;">
-        <strong>Important:</strong> this doesn't create Person or Deal records in Pipedrive — it only enriches ones that already exist. Your website's own contact form (or however leads reach you) still needs to create the Pipedrive Person itself; this just fills in where they came from once it does.
+        <strong>Important:</strong> this doesn't create Person, Lead, or Deal records in Pipedrive — it only enriches ones that already exist. Your website's own contact form (or however leads reach you) still needs to create the Pipedrive Person itself; this just fills in where they came from once it does.
       </p>
       <ol style="margin:0 0 16px; padding-left:20px; font-size:14px; line-height:1.7;">
         <li>In Pipedrive: <strong>Settings &gt; Tools and apps &gt; Webhooks</strong> &gt; Create new webhook.</li>
-        <li>Event action: <strong>*</strong> (all). Event object: <strong>Person</strong> — add a second webhook for <strong>Deal</strong> too if you want deal-level attribution snapshots, and a third for <strong>Activity</strong> if you'd like completed sales activities (calls, meetings, tasks marked done) to show up in each prospect's timeline.</li>
+        <li>Event action: <strong>*</strong> (all). Event object: select <strong>Person</strong> and <strong>Deal</strong> at minimum. Add <strong>Lead</strong> too if you want a permanent record of where each enquiry came from before it's converted to a Deal — see it under a Lead's "Marketing Attribution" fields once set. Add <strong>Activity</strong> if you'd like completed sales activities (calls, meetings, tasks marked done) to show up in each prospect's timeline, and <strong>Note</strong> to also capture notes added to a Person or Deal. One webhook covering all five event objects at once works fine — no need for separate webhooks per object.</li>
         <li>Paste the URL below as the endpoint. No separate auth needed — the secret's already in the URL.</li>
       </ol>
       <div class="as-code-block" id="webhook-code" style="word-break:break-all;"><button class="as-copy-btn" data-copy-target="webhook-code-text">Copy</button><span id="webhook-code-text"></span></div>
@@ -151,6 +151,31 @@
       </div>
     </div>
 
+    <div class="as-card as-utm-filter-bar" style="margin-bottom:20px;">
+      <div class="as-panel-head" style="margin-bottom:12px;">
+        <p class="as-panel-title" style="margin:0;">Segment by UTM</p>
+        <button type="button" class="as-export-link" id="utm-filter-clear" style="display:none;">Clear filters</button>
+      </div>
+      <p style="color:var(--as-body); font-size:12.5px; margin:0 0 14px;">Narrows every report below (and the drill-down popups) to prospects whose first touch matches — leave any of these on "All" to ignore it.</p>
+      <div class="as-utm-filter-grid">
+        <label class="as-utm-filter-field">Source<select id="utm-filter-source" class="as-select"><option value="">All</option></select></label>
+        <label class="as-utm-filter-field">Medium<select id="utm-filter-medium" class="as-select"><option value="">All</option></select></label>
+        <label class="as-utm-filter-field">Campaign<select id="utm-filter-campaign" class="as-select"><option value="">All</option></select></label>
+        <label class="as-utm-filter-field">Term<select id="utm-filter-term" class="as-select"><option value="">All</option></select></label>
+        <label class="as-utm-filter-field">Content<select id="utm-filter-content" class="as-select"><option value="">All</option></select></label>
+      </div>
+    </div>
+
+    <div class="as-card" style="margin-bottom:20px;">
+      <p class="as-panel-title">Conversion funnel</p>
+      <div id="funnel"></div>
+    </div>
+
+    <div class="as-card" style="margin-bottom:20px;">
+      <p class="as-panel-title">Touchpoints, last 30 days</p>
+      <div id="daily-chart"></div>
+    </div>
+
     <div class="as-panels">
       <div class="as-card">
         <p class="as-panel-title">First-touch channel</p>
@@ -163,11 +188,23 @@
     </div>
 
     <div class="as-card" style="margin-bottom:20px;">
+      <p class="as-panel-title">Conversion by source</p>
+      <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">How many prospects from each source went on to become a Deal in Pipedrive.</p>
+      <div id="conversion-by-source"></div>
+    </div>
+
+    <div class="as-card" style="margin-bottom:20px;">
       <div class="as-panel-head">
         <p class="as-panel-title">Top campaigns</p>
         <a class="as-export-link" href="/api/export/campaigns.csv">Download CSV</a>
       </div>
       <div id="campaigns-table"></div>
+    </div>
+
+    <div class="as-card" style="margin-bottom:20px;">
+      <p class="as-panel-title">Campaign performance</p>
+      <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">The same view, grouped by campaign instead of source. Each prospect is counted once here, so these numbers won't match "Top campaigns" above, which counts every touchpoint.</p>
+      <div id="campaign-performance"></div>
     </div>
 
     <div class="as-card">
@@ -188,6 +225,32 @@
   </div>
 </div>
 
+<!-- Click-through drill-down popup — opened by funnel stages / conversion
+     table rows (see openProspectModal below). Lives outside #content so
+     it's in the DOM regardless of the loading/billing-gate state. -->
+<div id="prospect-modal-overlay" class="as-modal-overlay" style="display:none;">
+  <div class="as-modal">
+    <div class="as-modal-header">
+      <div>
+        <h3 id="prospect-modal-title" class="as-modal-title"></h3>
+        <p id="prospect-modal-count" class="as-modal-count"></p>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; flex:none; flex-wrap:wrap; justify-content:flex-end;">
+        <label class="as-columns-check" style="font-size:13px; color:#555;">
+          <input type="checkbox" id="prospect-modal-show-anonymous-toggle" /> Show anonymous
+        </label>
+        <button type="button" class="as-export-link" id="prospect-modal-columns-btn">Columns</button>
+        <a class="as-export-link" id="prospect-modal-download" href="#" download>Download CSV</a>
+        <button type="button" class="as-modal-close" id="prospect-modal-close" aria-label="Close">&times;</button>
+      </div>
+    </div>
+    <div class="as-modal-body" id="prospect-modal-body">
+      <div id="prospect-modal-columns-panel" class="as-columns-panel" style="display:none;"></div>
+      <div id="prospect-modal-table"></div>
+    </div>
+  </div>
+</div>
+
 <script>
   // esc, CHANNEL_META(_BY_LABEL), metaFor(Label), channelBadge,
   // describeTouchpoint(Html), referrerDomain, utmDetail, clickIdSummary,
@@ -196,6 +259,56 @@
   // above) — shared with journey.html's standalone "View full journey"
   // page (the one a Pipedrive custom field links to) so both render a
   // prospect's history identically instead of drifting apart.
+
+  // Global UTM segment filter — narrows every report on the page plus
+  // the drill-down popups (see openProspectModal/updateModalCsvLink
+  // further down) and their CSV exports. Only populated keys are
+  // active; server-side matching is against each identity's first
+  // touch — see lib/portal-summary.ts's UtmFilter doc comment.
+  var currentUtmFilter = {};
+
+  function buildUtmQueryParams() {
+    var params = new URLSearchParams();
+    if (currentUtmFilter.source) params.set('utm_source', currentUtmFilter.source);
+    if (currentUtmFilter.medium) params.set('utm_medium', currentUtmFilter.medium);
+    if (currentUtmFilter.campaign) params.set('utm_campaign', currentUtmFilter.campaign);
+    if (currentUtmFilter.term) params.set('utm_term', currentUtmFilter.term);
+    if (currentUtmFilter.content) params.set('utm_content', currentUtmFilter.content);
+    return params;
+  }
+
+  // Appends the current global UTM filter onto a URL that already has
+  // its own query params (the drill-down popup's fetch/CSV-export URLs,
+  // which already carry ?by=/?value=/?anonymous=) — used so a funnel
+  // click while a UTM filter is active shows "of this UTM segment, who
+  // reached this stage," not the whole tenant.
+  function appendUtmParams(url) {
+    var params = buildUtmQueryParams();
+    var qs = params.toString();
+    if (!qs) return url;
+    return url + (url.indexOf('?') === -1 ? '?' : '&') + qs;
+  }
+
+  // distinctUtmValues is always computed from the tenant's FULL history
+  // regardless of the current filter (see its doc comment in
+  // portal-summary.ts), so this is safe to call after every refresh —
+  // the option lists never shrink as filters narrow the reports below.
+  function populateUtmFilterOptions(distinct) {
+    [
+      { id: 'utm-filter-source', options: distinct.sources },
+      { id: 'utm-filter-medium', options: distinct.mediums },
+      { id: 'utm-filter-campaign', options: distinct.campaigns },
+      { id: 'utm-filter-term', options: distinct.terms },
+      { id: 'utm-filter-content', options: distinct.contents },
+    ].forEach(function (f) {
+      var select = document.getElementById(f.id);
+      if (!select) return;
+      var current = select.value;
+      select.innerHTML =
+        '<option value="">All</option>' +
+        f.options.map(function (v) { return '<option value="' + esc(v) + '"' + (v === current ? ' selected' : '') + '>' + esc(v) + '</option>'; }).join('');
+    });
+  }
 
   function renderBars(container, rows) {
     if (!rows.length) {
@@ -224,6 +337,166 @@
       .map((r) => `<tr><td>${esc(r.campaign)}</td><td>${r.count}</td></tr>`)
       .join('')}</tbody></table>`;
   }
+
+  var FUNNEL_STAGE_TO_VALUE = {
+    'Total tracked': 'total',
+    'Identified': 'identified',
+    'Lead created': 'lead',
+    'Deal created': 'deal',
+    'Won': 'won',
+  };
+
+  function renderFunnel(container, rows) {
+    if (!rows.length || rows[0].count === 0) {
+      container.innerHTML = '<div class="as-empty">No data yet — tracking will populate this once visitors are identified.</div>';
+      return;
+    }
+    var max = rows[0].count; // "Total tracked" is always first and always the largest, by construction
+    container.innerHTML = '<div class="as-funnel">' + rows
+      .map(function (r) {
+        var pct = max > 0 ? Math.round((r.count / max) * 100) : 0;
+        var widthPct = max > 0 ? Math.max(r.count > 0 ? 4 : 0, (r.count / max) * 100) : 0;
+        var clickable = r.count > 0 ? ' as-clickable-row' : '';
+        return (
+          '<div class="as-funnel-row' + clickable + '" data-filter-by="funnel" data-filter-value="' + esc(FUNNEL_STAGE_TO_VALUE[r.stage] || '') + '" data-filter-label="' + esc(r.stage) + '">' +
+          '<div class="as-funnel-label">' + esc(r.stage) + '</div>' +
+          '<div class="as-funnel-track"><div class="as-funnel-fill" style="width:' + widthPct + '%"></div></div>' +
+          '<div class="as-funnel-count">' + r.count + ' <span class="as-funnel-pct">(' + pct + '%)</span></div>' +
+          '</div>'
+        );
+      })
+      .join('') + '</div>';
+    container.querySelectorAll('[data-filter-by]').forEach(function (row) {
+      if (!row.classList.contains('as-clickable-row')) return;
+      row.addEventListener('click', function () {
+        openProspectModal(row.getAttribute('data-filter-by'), row.getAttribute('data-filter-value'), row.getAttribute('data-filter-label'));
+      });
+    });
+  }
+
+  function renderDailyChart(container, rows) {
+    if (!rows.length || rows.every(function (r) { return r.count === 0; })) {
+      container.innerHTML = '<div class="as-empty">No touchpoints in the last 30 days yet.</div>';
+      return;
+    }
+    var max = Math.max.apply(null, rows.map(function (r) { return r.count; }));
+    var bars = rows
+      .map(function (r) {
+        var pct = max > 0 ? Math.max(r.count > 0 ? 4 : 0, (r.count / max) * 100) : 0;
+        var d = new Date(r.date + 'T00:00:00Z');
+        var label = (d.getUTCMonth() + 1) + '/' + d.getUTCDate();
+        return (
+          '<div class="as-daily-bar-wrap" title="' + label + ': ' + r.count + ' touchpoint' + (r.count === 1 ? '' : 's') + '">' +
+          '<div class="as-daily-bar" style="height:' + pct + '%"></div>' +
+          '</div>'
+        );
+      })
+      .join('');
+    // Labels every 5th day only — 30 individual date labels would overlap
+    // and be unreadable at typical card widths; the bar tooltip (title
+    // attribute above) still gives the exact date+count for any single day.
+    var labels = rows
+      .map(function (r, i) {
+        if (i % 5 !== 0 && i !== rows.length - 1) return '<span></span>';
+        var d = new Date(r.date + 'T00:00:00Z');
+        return '<span>' + (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + '</span>';
+      })
+      .join('');
+    container.innerHTML = '<div class="as-daily-chart">' + bars + '</div><div class="as-daily-labels">' + labels + '</div>';
+  }
+
+  function renderConversionTable(container, rows, keyName, emptyMessage) {
+    if (!rows.length) {
+      container.innerHTML = '<div class="as-empty">' + emptyMessage + '</div>';
+      return;
+    }
+    var label = keyName === 'source' ? 'Source' : 'Campaign';
+    container.innerHTML =
+      '<table class="as-table as-conversion-table"><thead><tr><th>' +
+      label +
+      '</th><th>Prospects</th><th>Converted to Deal</th><th>Rate</th></tr></thead><tbody>' +
+      rows
+        .map(function (r) {
+          var pct = Math.round(r.rate * 100);
+          var rateClass = r.rate >= 0.2 ? ' as-rate-good' : '';
+          var value = r[keyName];
+          return (
+            '<tr class="as-clickable-row" data-filter-by="' + keyName + '" data-filter-value="' + esc(value) + '" data-filter-label="' + esc(label) + ': ' + esc(value) + '"><td>' +
+            esc(value) +
+            '</td><td>' +
+            r.total +
+            '</td><td>' +
+            r.converted +
+            '</td><td class="as-rate-cell' +
+            rateClass +
+            '">' +
+            pct +
+            '%</td></tr>'
+          );
+        })
+        .join('') +
+      '</tbody></table>';
+    container.querySelectorAll('[data-filter-by]').forEach(function (row) {
+      row.addEventListener('click', function () {
+        openProspectModal(row.getAttribute('data-filter-by'), row.getAttribute('data-filter-value'), row.getAttribute('data-filter-label'));
+      });
+    });
+  }
+
+  // Click-through drill-down: fetches the FULL matching prospect list
+  // (not the summary's own 25-capped "recent" array — see
+  // Click-through drill-down: fetches the FULL matching prospect list
+  // (not the summary's own 25-capped "recent" array — see
+  // lib/portal-summary.ts's filterProspects doc comment for why that
+  // distinction matters) and shows it in a popup, with its own
+  // Show anonymous toggle / Columns control / Download CSV link — the
+  // last two scoped to the same filter (routes/portal.ts's
+  // /api/export/prospects-filtered.csv).
+  var prospectModalOverlay = document.getElementById('prospect-modal-overlay');
+  var lastModalRows = []; // separate from lastRecentRows — see renderProspectTable's doc comment for why the two caches can't be shared
+  var modalFilterBy = null;
+  var modalFilterValue = null;
+
+  function renderModal(rows) {
+    lastModalRows = rows;
+    renderProspectTable(document.getElementById('prospect-modal-table'), rows);
+  }
+
+  function updateModalCsvLink() {
+    var link = document.getElementById('prospect-modal-download');
+    if (!modalFilterBy) return;
+    link.href = appendUtmParams(
+      '/api/export/prospects-filtered.csv?by=' + encodeURIComponent(modalFilterBy) + '&value=' + encodeURIComponent(modalFilterValue) + '&anonymous=' + (showAnonymous ? '1' : '0')
+    );
+  }
+
+  async function openProspectModal(by, value, label) {
+    modalFilterBy = by;
+    modalFilterValue = value;
+    document.getElementById('prospect-modal-title').textContent = label;
+    document.getElementById('prospect-modal-count').textContent = 'Loading…';
+    document.getElementById('prospect-modal-show-anonymous-toggle').checked = showAnonymous;
+    document.getElementById('prospect-modal-columns-panel').style.display = 'none';
+    updateModalCsvLink();
+    document.getElementById('prospect-modal-table').innerHTML = '<div class="as-empty">Loading…</div>';
+    prospectModalOverlay.style.display = 'flex';
+    try {
+      var res = await fetch(appendUtmParams('/api/prospects/filtered?by=' + encodeURIComponent(by) + '&value=' + encodeURIComponent(value)), { credentials: 'include' });
+      if (!res.ok) throw new Error('request failed');
+      var data = await res.json();
+      document.getElementById('prospect-modal-count').textContent = data.prospects.length + ' prospect' + (data.prospects.length === 1 ? '' : 's');
+      renderModal(data.prospects);
+    } catch (err) {
+      document.getElementById('prospect-modal-count').textContent = 'Failed to load';
+      document.getElementById('prospect-modal-table').innerHTML = '<div class="as-empty">Something went wrong loading this — try again.</div>';
+    }
+  }
+
+  function closeProspectModal() {
+    prospectModalOverlay.style.display = 'none';
+  }
+
+
 
   var prospectCache = {};
 
@@ -424,11 +697,35 @@
   // UI/progress for free.
   function updateCsvExportLink() {
     var link = document.getElementById('recent-download-csv');
-    if (link) link.href = '/api/export/prospects.csv?anonymous=' + (showAnonymous ? '1' : '0');
+    if (link) link.href = appendUtmParams('/api/export/prospects.csv?anonymous=' + (showAnonymous ? '1' : '0'));
+    updateModalCsvLink();
   }
 
-  function renderRecent(container, rows) {
-    lastRecentRows = rows;
+  // Shared by the main table's and the modal's own "Show anonymous"
+  // checkboxes — one shared preference (see renderProspectTable's doc
+  // comment), so toggling it in either place keeps both checkboxes and
+  // both CSV export links in sync, even though only one of the two
+  // tables is ever visible at once (the modal is a full-screen overlay).
+  function setShowAnonymous(value) {
+    showAnonymous = value;
+    saveShowAnonymousPref(showAnonymous);
+    updateCsvExportLink();
+    var mainToggle = document.getElementById('recent-show-anonymous-toggle');
+    if (mainToggle) mainToggle.checked = showAnonymous;
+    var modalToggle = document.getElementById('prospect-modal-show-anonymous-toggle');
+    if (modalToggle) modalToggle.checked = showAnonymous;
+  }
+
+  // The actual table-drawing logic — deliberately has no side effect on
+  // any cache variable, so it can safely back BOTH the main table
+  // (renderRecent, which caches into lastRecentRows) and the drill-down
+  // popup (renderModal, which caches into lastModalRows) without the two
+  // clobbering each other's cache when only one of them is visible at a
+  // time. Both share the same underlying showAnonymous/recentColumnPrefs
+  // preference state, deliberately — a column hidden in one is hidden in
+  // both, same "one browser, one set of display preferences" idea as
+  // every other localStorage-backed setting on this page.
+  function renderProspectTable(container, rows) {
     var visibleRows = showAnonymous ? rows : rows.filter(function (r) { return !!r.email; });
 
     if (!rows.length) {
@@ -436,7 +733,7 @@
       return;
     }
     if (!visibleRows.length) {
-      container.innerHTML = '<div class="as-empty">All recent activity so far is from anonymous visitors — check "Show anonymous" above to see it.</div>';
+      container.innerHTML = '<div class="as-empty">All matching activity is from anonymous visitors — check "Show anonymous" above to see it.</div>';
       return;
     }
     rows = visibleRows;
@@ -485,13 +782,18 @@
     });
   }
 
+  function renderRecent(container, rows) {
+    lastRecentRows = rows;
+    renderProspectTable(container, rows);
+  }
+
   // The show/hide + reorder control living in #recent-columns-panel,
   // toggled open by the "Columns" button next to Download CSV. Reorder
   // uses up/down buttons rather than drag-and-drop — no extra library,
   // and it works the same with a mouse, keyboard, or touch, which
   // drag-and-drop reordering built from scratch usually doesn't without
   // real effort.
-  function renderColumnsPanel(container) {
+  function renderColumnsPanel(container, onChange) {
     var order = recentColumnPrefs.order;
     var rowsHtml = order
       .map(function (key, i) {
@@ -521,7 +823,7 @@
       '<div class="as-columns-list">' +
       rowsHtml +
       '</div>' +
-      '<button type="button" class="as-btn-text as-columns-reset" id="recent-columns-reset">Reset to default</button>';
+      '<button type="button" class="as-btn-text as-columns-reset">Reset to default</button>';
 
     container.querySelectorAll('input[type="checkbox"][data-key]').forEach(function (input) {
       if (input.disabled) return; // alwaysVisible column — nothing to toggle
@@ -531,7 +833,7 @@
         if (input.checked && idx !== -1) recentColumnPrefs.hidden.splice(idx, 1);
         if (!input.checked && idx === -1) recentColumnPrefs.hidden.push(key);
         saveColumnPrefs(recentColumnPrefs);
-        renderRecent(document.getElementById('recent-table'), lastRecentRows);
+        onChange();
       });
     });
 
@@ -547,18 +849,18 @@
         order[to] = order[from];
         order[from] = tmp;
         saveColumnPrefs(recentColumnPrefs);
-        renderColumnsPanel(container);
-        renderRecent(document.getElementById('recent-table'), lastRecentRows);
+        renderColumnsPanel(container, onChange);
+        onChange();
       });
     });
 
-    document.getElementById('recent-columns-reset').addEventListener('click', function () {
+    container.querySelector('.as-columns-reset').addEventListener('click', function () {
       try {
         localStorage.removeItem(RECENT_COLUMN_PREFS_KEY);
       } catch (e) {}
       recentColumnPrefs = loadColumnPrefs();
-      renderColumnsPanel(container);
-      renderRecent(document.getElementById('recent-table'), lastRecentRows);
+      renderColumnsPanel(container, onChange);
+      onChange();
     });
   }
 
@@ -730,6 +1032,59 @@
     btn.addEventListener('click', function () { startBillingRedirect('/api/billing/portal-session', btn); });
   }
 
+  // Fetches /api/summary with the current UTM filter applied and
+  // re-renders every report section — split out from load() so the
+  // filter bar's dropdowns can refresh just the reports without
+  // re-running the me/billing/install checks load() also does on first
+  // paint. Returns the summary (so load() can still use
+  // s.totalTouchpoints for renderInstall), or null if the session
+  // turned out to be invalid (triggers a full reload, same as load()'s
+  // original inline handling of a failed fetch).
+  async function refreshReports() {
+    var qs = buildUtmQueryParams().toString();
+    var summaryRes = await fetch('/api/summary' + (qs ? '?' + qs : ''), { credentials: 'include' });
+    if (!summaryRes.ok) {
+      window.location.reload();
+      return null;
+    }
+    var s = await summaryRes.json();
+
+    document.getElementById('stat-identities').textContent = s.identifiedIdentities;
+    document.getElementById('stat-touchpoints').textContent = s.totalTouchpoints;
+    document.getElementById('stat-total').textContent = s.totalIdentities;
+
+    populateUtmFilterOptions(s.distinctUtmValues);
+    document.getElementById('utm-filter-clear').style.display = qs ? 'inline-block' : 'none';
+    updateCsvExportLink();
+
+    renderFunnel(document.getElementById('funnel'), s.funnel);
+    renderDailyChart(document.getElementById('daily-chart'), s.touchpointsByDay);
+    renderBars(document.getElementById('first-touch-bars'), s.firstTouchChannelCounts);
+    renderBars(document.getElementById('last-touch-bars'), s.lastTouchChannelCounts);
+    renderConversionTable(document.getElementById('conversion-by-source'), s.conversionBySource, 'source', 'No data yet.');
+    renderCampaigns(document.getElementById('campaigns-table'), s.topCampaigns);
+    renderConversionTable(document.getElementById('campaign-performance'), s.campaignPerformance, 'campaign', 'No campaign data yet.');
+    renderRecent(document.getElementById('recent-table'), s.recent);
+    return s;
+  }
+
+  ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content'].forEach(function (id) {
+    document.getElementById(id).addEventListener('change', function (event) {
+      var key = id.replace('utm-filter-', '');
+      if (event.target.value) currentUtmFilter[key] = event.target.value;
+      else delete currentUtmFilter[key];
+      refreshReports();
+    });
+  });
+
+  document.getElementById('utm-filter-clear').addEventListener('click', function () {
+    currentUtmFilter = {};
+    ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content'].forEach(function (id) {
+      document.getElementById(id).value = '';
+    });
+    refreshReports();
+  });
+
   async function load() {
     // Land here right after Stripe Checkout with ?billing=success — strip
     // it immediately so a refresh doesn't re-trigger this branch, then
@@ -768,28 +1123,12 @@
       return;
     }
 
-    const summaryRes = await fetch('/api/summary', { credentials: 'include' });
-    if (!summaryRes.ok) {
-      // 402 here would mean the client-side check above and the server
-      // disagree (a real bug) or the status changed between the two
-      // calls — either way, a fresh load re-evaluates from scratch rather
-      // than showing a confusing partial dashboard.
-      window.location.reload();
-      return;
-    }
-    const s = await summaryRes.json();
-
-    document.getElementById('stat-identities').textContent = s.identifiedIdentities;
-    document.getElementById('stat-touchpoints').textContent = s.totalTouchpoints;
-    document.getElementById('stat-total').textContent = s.totalIdentities;
+    const s = await refreshReports();
+    if (!s) return; // refreshReports already triggered a reload on failure
 
     renderTrialBanner(me);
     renderInstall(me.install, s.totalTouchpoints > 0);
     renderVisitLogging(me);
-    renderBars(document.getElementById('first-touch-bars'), s.firstTouchChannelCounts);
-    renderBars(document.getElementById('last-touch-bars'), s.lastTouchChannelCounts);
-    renderCampaigns(document.getElementById('campaigns-table'), s.topCampaigns);
-    renderRecent(document.getElementById('recent-table'), s.recent);
 
     document.getElementById('loading').style.display = 'none';
     document.getElementById('content').style.display = 'block';
@@ -806,6 +1145,29 @@
     window.location.href = '/';
   });
 
+  document.getElementById('prospect-modal-close').addEventListener('click', closeProspectModal);
+  prospectModalOverlay.addEventListener('click', function (event) {
+    if (event.target === prospectModalOverlay) closeProspectModal();
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && prospectModalOverlay.style.display !== 'none') closeProspectModal();
+  });
+
+  document.getElementById('prospect-modal-show-anonymous-toggle').addEventListener('change', function (event) {
+    setShowAnonymous(event.target.checked);
+    renderModal(lastModalRows);
+  });
+
+  var modalColumnsPanelRendered = false;
+  document.getElementById('prospect-modal-columns-btn').addEventListener('click', function () {
+    var panel = document.getElementById('prospect-modal-columns-panel');
+    if (!modalColumnsPanelRendered) {
+      renderColumnsPanel(panel, function () { renderModal(lastModalRows); });
+      modalColumnsPanelRendered = true;
+    }
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  });
+
   // Lazily renders the columns panel the first time it's opened (its
   // content doesn't exist until then), then just toggles visibility on
   // later clicks — the panel re-renders itself on every actual change
@@ -815,7 +1177,7 @@
   document.getElementById('recent-columns-btn').addEventListener('click', function () {
     var panel = document.getElementById('recent-columns-panel');
     if (!recentColumnsPanelRendered) {
-      renderColumnsPanel(panel);
+      renderColumnsPanel(panel, function () { renderRecent(document.getElementById('recent-table'), lastRecentRows); });
       recentColumnsPanelRendered = true;
     }
     panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
@@ -825,9 +1187,7 @@
   showAnonymousToggle.checked = showAnonymous;
   updateCsvExportLink();
   showAnonymousToggle.addEventListener('change', function () {
-    showAnonymous = showAnonymousToggle.checked;
-    saveShowAnonymousPref(showAnonymous);
-    updateCsvExportLink();
+    setShowAnonymous(showAnonymousToggle.checked);
     renderRecent(document.getElementById('recent-table'), lastRecentRows);
   });
 

@@ -434,7 +434,7 @@ a {
 }
 
 .as-dash-body {
-  max-width: 1080px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 32px 24px 60px;
 }
@@ -605,6 +605,27 @@ button.as-export-link {
   padding: 10px 14px;
 }
 
+.as-utm-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.as-utm-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--as-body);
+}
+
+.as-utm-filter-field select {
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 8px 10px;
+}
+
 .as-bar-row {
   display: flex;
   align-items: center;
@@ -643,6 +664,186 @@ button.as-export-link {
   text-align: right;
   font-weight: 700;
   color: var(--as-body);
+}
+
+/* Conversion funnel — a horizontal row of stages, each bar's width
+   scaled relative to the first (largest) stage so the narrowing reads
+   at a glance, same "width % of a max value" approach as .as-bar-fill
+   above but arranged as a funnel rather than a ranked list. */
+.as-funnel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.as-funnel-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 90px;
+  align-items: center;
+  gap: 12px;
+  font-size: 13.5px;
+}
+
+.as-funnel-label {
+  font-weight: 600;
+  color: var(--as-ink);
+}
+
+.as-funnel-track {
+  background: #f1f3f5;
+  border-radius: 8px;
+  height: 28px;
+  overflow: hidden;
+}
+
+.as-funnel-fill {
+  height: 100%;
+  background: var(--as-green);
+  border-radius: 8px;
+  transition: width 0.2s ease;
+}
+
+.as-funnel-count {
+  text-align: right;
+  font-weight: 700;
+  color: var(--as-body);
+  white-space: nowrap;
+}
+
+.as-funnel-pct {
+  font-weight: 400;
+  color: var(--as-body);
+  font-size: 12px;
+}
+
+/* Daily touchpoint volume — plain CSS bars (height %, not width %, since
+   this reads left-to-right as a timeline) rather than an SVG/canvas
+   chart library; consistent with .as-bar-fill above, this project has no
+   charting dependency and every other chart-like element here is
+   hand-rolled the same way. */
+.as-daily-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 120px;
+  margin-bottom: 8px;
+}
+
+.as-daily-bar-wrap {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+
+.as-daily-bar {
+  width: 100%;
+  background: var(--as-green);
+  border-radius: 3px 3px 0 0;
+  min-height: 2px;
+}
+
+.as-daily-labels {
+  display: flex;
+  gap: 3px;
+  font-size: 10.5px;
+  color: var(--as-body);
+}
+
+.as-daily-labels span {
+  flex: 1;
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.as-conversion-table td.as-rate-cell {
+  font-weight: 700;
+}
+
+.as-conversion-table td.as-rate-cell.as-rate-good {
+  color: var(--as-green-text);
+}
+
+/* Drill-down affordance — funnel rows and conversion-table rows that,
+   when clicked, filter the Recently active prospects table below (see
+   dashboard.html's applyProspectFilter). */
+.as-clickable-row {
+  cursor: pointer;
+}
+
+.as-funnel-row.as-clickable-row:hover .as-funnel-label {
+  text-decoration: underline;
+}
+
+tr.as-clickable-row:hover {
+  background: #f8faf9;
+}
+
+/* Click-through drill-down popup (dashboard.html's openProspectModal). */
+.as-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(11, 18, 32, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.as-modal {
+  background: #fff;
+  border-radius: var(--as-radius-card);
+  box-shadow: var(--as-shadow);
+  width: 100%;
+  max-width: 1080px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.as-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--as-border);
+  flex: none;
+}
+
+.as-modal-title {
+  font-size: 17px;
+  font-weight: 800;
+  margin: 0 0 4px;
+}
+
+.as-modal-count {
+  font-size: 13px;
+  color: var(--as-body);
+  margin: 0;
+}
+
+.as-modal-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  line-height: 1;
+  color: var(--as-body);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.as-modal-close:hover {
+  color: var(--as-ink);
+}
+
+.as-modal-body {
+  padding: 20px 24px 24px;
+  overflow-y: auto;
+  flex: 1;
 }
 
 /* Lets a wide table (e.g. Recently active prospects, with its own

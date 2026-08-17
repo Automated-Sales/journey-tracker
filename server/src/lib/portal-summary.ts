@@ -21,6 +21,120 @@ export interface CampaignCount {
   count: number;
 }
 
+// "Conversion" here always means "this identity has a Deal" (i.e.
+// dealCreatedDealId is set) — the same signal the Recently active
+// prospects table already surfaces per-row via leadToDealTouchpoints/
+// dealToWonTouchpoints, just aggregated here instead of shown per prospect.
+// Grouped by each identity's own CURRENT first-touch value (via
+// buildAttributionSummary, same living data the channel/campaign bars
+// above already use) rather than any frozen Lead/Deal snapshot — this
+// keeps every number on the dashboard describing "the journey as it
+// looks today," consistent with how firstTouchChannelCounts/topCampaigns
+// already work, rather than mixing living and frozen-at-a-past-moment
+// data in the same view.
+export interface SourceConversion {
+  source: string;
+  total: number;
+  converted: number;
+  rate: number; // 0–1, converted / total
+}
+
+export interface CampaignPerformance {
+  campaign: string;
+  total: number; // distinct identities whose first touch had this campaign — NOT the same count as topCampaigns above, which counts every touchpoint (so one prospect with 3 visits under the same campaign counts 3x there, 1x here). Kept as a separate field/panel rather than changing topCampaigns' existing meaning, since the CSV export and any saved links to it shouldn't silently change shape.
+  converted: number;
+  rate: number;
+}
+
+// One entry per funnel stage, in order — deliberately an array rather
+// than named fields, so dashboard.html can render it as a simple loop
+// without knowing the stage list in advance (and so adding a stage later
+// is a one-line change here, not a matching change in two places).
+export interface FunnelStage {
+  stage: string;
+  count: number;
+}
+
+export interface TouchpointsByDay {
+  date: string; // YYYY-MM-DD, identity's local calendar day is NOT
+  // used here — bucketed in UTC (same as every occurredAt timestamp
+  // already stored) for consistency across tenants in different time
+  // zones, not because it's necessarily the ideal display timezone.
+  count: number;
+}
+
+// Segments every report on this dashboard by UTM dimension — matched
+// against each identity's FIRST touch (same "first touch is the primary
+// lens" convention already used throughout this file for
+// conversionBySource/campaignPerformance), not against every individual
+// touchpoint. An identity whose first visit was google/cpc but who later
+// also clicked a Facebook ad still counts as "google" here — segmenting
+// by "what originally brought this prospect in," not "every channel
+// they've ever touched." All populated dimensions are ANDed together.
+export interface UtmFilter {
+  source?: string;
+  medium?: string;
+  campaign?: string;
+  term?: string;
+  content?: string;
+}
+
+function utmFilterIsEmpty(filter?: UtmFilter): boolean {
+  return !filter || !(filter.source || filter.medium || filter.campaign || filter.term || filter.content);
+}
+
+function matchesUtmFilter(
+  summary: NonNullable<ReturnType<typeof buildAttributionSummary>> | null,
+  filter?: UtmFilter
+): boolean {
+  if (utmFilterIsEmpty(filter)) return true;
+  if (!summary) return false;
+  const f = filter!;
+  if (f.source && summary.firstTouchSource !== f.source) return false;
+  if (f.medium && summary.firstTouchMedium !== f.medium) return false;
+  if (f.campaign && summary.firstTouchCampaign !== f.campaign) return false;
+  if (f.term && summary.firstTouchTerm !== f.term) return false;
+  if (f.content && summary.firstTouchContent !== f.content) return false;
+  return true;
+}
+
+// The options a UTM filter dropdown should offer — always computed from
+// the tenant's FULL, unfiltered touchpoint history (every touchpoint any
+// identity ever had, not just first touches) regardless of whatever
+// filter is currently applied, so the dropdown's own option list never
+// shrinks or changes shape as the person filters — only the reports
+// below it do.
+export interface DistinctUtmValues {
+  sources: string[];
+  mediums: string[];
+  campaigns: string[];
+  terms: string[];
+  contents: string[];
+}
+
+function collectDistinctUtmValues(touchpoints: Touchpoint[]): DistinctUtmValues {
+  const sources = new Set<string>();
+  const mediums = new Set<string>();
+  const campaigns = new Set<string>();
+  const terms = new Set<string>();
+  const contents = new Set<string>();
+  for (const tp of touchpoints) {
+    if (tp.source) sources.add(tp.source);
+    if (tp.medium) mediums.add(tp.medium);
+    if (tp.campaign) campaigns.add(tp.campaign);
+    if (tp.term) terms.add(tp.term);
+    if (tp.content) contents.add(tp.content);
+  }
+  const alpha = (a: string, b: string) => a.localeCompare(b);
+  return {
+    sources: Array.from(sources).sort(alpha),
+    mediums: Array.from(mediums).sort(alpha),
+    campaigns: Array.from(campaigns).sort(alpha),
+    terms: Array.from(terms).sort(alpha),
+    contents: Array.from(contents).sort(alpha),
+  };
+}
+
 export interface RecentProspect {
   identityId: string;
   email: string | null;
@@ -71,6 +185,11 @@ export interface PortalSummary {
   lastTouchChannelCounts: ChannelCount[];
   topCampaigns: CampaignCount[];
   recent: RecentProspect[];
+  conversionBySource: SourceConversion[];
+  campaignPerformance: CampaignPerformance[];
+  funnel: FunnelStage[];
+  touchpointsByDay: TouchpointsByDay[];
+  distinctUtmValues: DistinctUtmValues;
 }
 
 function toSortedChannelCounts(m: Map<string, number>): ChannelCount[] {
@@ -79,7 +198,166 @@ function toSortedChannelCounts(m: Map<string, number>): ChannelCount[] {
     .sort((a, b) => b.count - a.count);
 }
 
-export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoint[]): PortalSummary {
+// Shared shape/sorting logic for conversionBySource and
+// campaignPerformance below — both are "group identities by some
+// first-touch attribute, count how many of each group have a Deal,"
+// just keyed differently. Two small typed wrappers rather than one
+// generic function, to keep the call sites plainly typed.
+function toSourceConversions(totals: Map<string, number>, converted: Map<string, number>): SourceConversion[] {
+  return Array.from(totals.entries())
+    .map(([source, total]) => {
+      const won = converted.get(source) ?? 0;
+      return { source, total, converted: won, rate: total > 0 ? won / total : 0 };
+    })
+    .sort((a, b) => b.total - a.total);
+}
+
+function toCampaignPerformance(totals: Map<string, number>, converted: Map<string, number>): CampaignPerformance[] {
+  return Array.from(totals.entries())
+    .map(([campaign, total]) => {
+      const won = converted.get(campaign) ?? 0;
+      return { campaign, total, converted: won, rate: total > 0 ? won / total : 0 };
+    })
+    .sort((a, b) => b.total - a.total);
+}
+
+const TOUCHPOINTS_BY_DAY_WINDOW_DAYS = 30;
+
+// UTC calendar-day bucketing — see TouchpointsByDay's doc comment for
+// why UTC specifically. toISOString().slice(0, 10) is a cheap, exact way
+// to get "YYYY-MM-DD in UTC" without a date library.
+function dayKey(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function toRecentProspect(identity: Identity, summary: ReturnType<typeof buildAttributionSummary>): RecentProspect {
+  return {
+    identityId: identity.id,
+    email: identity.email,
+    firstTouchChannel: summary!.firstTouchChannel,
+    lastTouchChannel: summary!.lastTouchChannel,
+    touchpointCount: summary!.touchpointCount,
+    lastSeenAt: identity.lastSeenAt.toISOString(),
+    firstTouchReferrer: summary!.firstTouchReferrer,
+    firstTouchSource: summary!.firstTouchSource,
+    firstTouchMedium: summary!.firstTouchMedium,
+    firstTouchCampaign: summary!.firstTouchCampaign,
+    firstTouchTerm: summary!.firstTouchTerm,
+    firstTouchContent: summary!.firstTouchContent,
+    leadToDealTouchpoints: identity.leadToDealTouchpoints,
+    dealToWonTouchpoints: identity.dealToWonTouchpoints,
+    pipedrivePersonId: identity.pipedrivePersonId,
+  };
+}
+
+export type ProspectFilter =
+  | { type: "funnel"; value: "total" | "identified" | "lead" | "deal" | "won" }
+  | { type: "source"; value: string }
+  | { type: "campaign"; value: string };
+
+// The actual matching logic, shared by filterProspects (JSON, for the
+// dashboard's popup) and filterIdentities (raw Identity rows, for the
+// popup's "Download CSV" button — see routes/portal.ts's
+// /api/export/prospects-filtered.csv, which feeds these straight into
+// the same buildProspectsCsv used by the main export). Keeping ONE
+// filtering implementation means the popup's on-screen count and its
+// downloaded CSV's row count can never silently disagree.
+function matchingIdentities(
+  identities: Identity[],
+  touchpoints: Touchpoint[],
+  filter: ProspectFilter,
+  utmFilter?: UtmFilter
+): Array<{ identity: Identity; summary: NonNullable<ReturnType<typeof buildAttributionSummary>> | null }> {
+  const byIdentity = new Map<string, Touchpoint[]>();
+  for (const tp of touchpoints) {
+    if (!tp.identityId) continue;
+    const list = byIdentity.get(tp.identityId) ?? [];
+    list.push(tp);
+    byIdentity.set(tp.identityId, list);
+  }
+
+  const results: Array<{ identity: Identity; summary: NonNullable<ReturnType<typeof buildAttributionSummary>> | null }> = [];
+  for (const identity of identities) {
+    if (filter.type === "funnel") {
+      if (filter.value === "identified" && !identity.email) continue;
+      if (filter.value === "lead" && !identity.leadCreatedAt) continue;
+      if (filter.value === "deal" && identity.dealCreatedDealId === null) continue;
+      if (filter.value === "won" && identity.wonDealId === null) continue;
+    }
+
+    const tps = (byIdentity.get(identity.id) ?? []).slice().sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
+    const summary = buildAttributionSummary(tps);
+
+    if (!matchesUtmFilter(summary, utmFilter)) continue;
+
+    // "total" is the one funnel value that matches even an identity with
+    // zero touchpoints (no summary) — every other filter branch below
+    // needs a real summary to check against, and an identity with no
+    // touchpoints has no first-touch source/campaign/channel to match.
+    // (An active utmFilter already excluded no-summary identities above,
+    // via matchesUtmFilter's own `if (!summary) return false`.)
+    if (filter.type === "funnel" && filter.value === "total") {
+      results.push({ identity, summary });
+      continue;
+    }
+    if (!summary) continue;
+
+    if (filter.type === "source" && summary.firstTouchSource !== filter.value) continue;
+    if (filter.type === "campaign" && summary.firstTouchCampaign !== filter.value) continue;
+
+    results.push({ identity, summary });
+  }
+
+  results.sort((a, b) => b.identity.lastSeenAt.getTime() - a.identity.lastSeenAt.getTime());
+  return results;
+}
+
+// Powers the dashboard's click-through drill-down — clicking a funnel
+// stage, a conversion-by-source row, or a campaign-performance row calls
+// this (via routes/portal.ts's /api/prospects/filtered) to show exactly
+// which prospects make up that number. Deliberately NOT reusing
+// buildPortalSummary's own `recent` array for this: that list is capped
+// at the 25 most-recently-seen identities specifically for the default
+// dashboard view, so filtering it client-side would silently return an
+// incomplete (and misleadingly small) result for any tenant with more
+// than 25 identified prospects. This recomputes from the full identity
+// list instead, so a filtered result is always complete regardless of
+// how many prospects the tenant has.
+//
+// The optional utmFilter composes with the ProspectFilter (AND, not
+// OR) — if the dashboard's global UTM filter bar is active when someone
+// clicks a funnel stage, the popup shows "of THIS UTM segment, who
+// reached this funnel stage," not the whole tenant.
+export function filterProspects(
+  identities: Identity[],
+  touchpoints: Touchpoint[],
+  filter: ProspectFilter,
+  utmFilter?: UtmFilter
+): RecentProspect[] {
+  return matchingIdentities(identities, touchpoints, filter, utmFilter)
+    .filter((m) => m.summary) // "total" can include no-touchpoint identities with summary=null — nothing meaningful to show as a RecentProspect row for those (same exclusion buildPortalSummary's own `recent` list already applies)
+    .map((m) => toRecentProspect(m.identity, m.summary));
+}
+
+// Same filter, but returns the raw Identity rows instead of the
+// dashboard's RecentProspect shape — for routes/portal.ts's CSV export,
+// which needs actual Identity objects to hand to buildProspectsCsv (the
+// same function the main "Download CSV" button already uses).
+export function filterIdentities(
+  identities: Identity[],
+  touchpoints: Touchpoint[],
+  filter: ProspectFilter,
+  utmFilter?: UtmFilter
+): Identity[] {
+  return matchingIdentities(identities, touchpoints, filter, utmFilter).map((m) => m.identity);
+}
+
+export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoint[], utmFilter?: UtmFilter): PortalSummary {
+  // Always computed from the full, unfiltered touchpoint list — see
+  // DistinctUtmValues' doc comment for why this must never itself be
+  // affected by utmFilter.
+  const distinctUtmValues = collectDistinctUtmValues(touchpoints);
+
   const byIdentity = new Map<string, Touchpoint[]>();
   for (const tp of touchpoints) {
     if (!tp.identityId) continue;
@@ -93,12 +371,39 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
   const campaignCounts = new Map<string, number>();
   const recent: RecentProspect[] = [];
 
+  const sourceTotals = new Map<string, number>();
+  const sourceConverted = new Map<string, number>();
+  const campaignTotals = new Map<string, number>();
+  const campaignConverted = new Map<string, number>();
+  let leadCreatedCount = 0;
+  let dealCreatedCount = 0;
+  let wonCount = 0;
+  // Tracks the population actually included below — equals
+  // identities.length only when utmFilter is empty (backward-compatible
+  // with every existing "Total tracked"/totalIdentities behavior); once
+  // a filter narrows things, these become "how many identities matched
+  // the filter" instead, since a UTM segment is meaningless for an
+  // identity with no touchpoints to check it against.
+  let matchedCount = 0;
+  let matchedIdentifiedCount = 0;
+  const matchedIdentityIds = new Set<string>();
+
   for (const identity of identities) {
     const tps = (byIdentity.get(identity.id) ?? [])
       .slice()
       .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
     const summary = buildAttributionSummary(tps);
     if (!summary) continue;
+    if (!matchesUtmFilter(summary, utmFilter)) continue;
+
+    matchedCount++;
+    matchedIdentityIds.add(identity.id);
+    if (identity.email) matchedIdentifiedCount++;
+
+    const converted = identity.dealCreatedDealId !== null;
+    if (identity.leadCreatedAt) leadCreatedCount++;
+    if (identity.dealCreatedDealId !== null) dealCreatedCount++;
+    if (identity.wonDealId !== null) wonCount++;
 
     firstCounts.set(summary.firstTouchChannel, (firstCounts.get(summary.firstTouchChannel) ?? 0) + 1);
     lastCounts.set(summary.lastTouchChannel, (lastCounts.get(summary.lastTouchChannel) ?? 0) + 1);
@@ -106,31 +411,58 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
       if (tp.campaign) campaignCounts.set(tp.campaign, (campaignCounts.get(tp.campaign) ?? 0) + 1);
     }
 
-    recent.push({
-      identityId: identity.id,
-      email: identity.email,
-      firstTouchChannel: summary.firstTouchChannel,
-      lastTouchChannel: summary.lastTouchChannel,
-      touchpointCount: summary.touchpointCount,
-      lastSeenAt: identity.lastSeenAt.toISOString(),
-      firstTouchReferrer: summary.firstTouchReferrer,
-      firstTouchSource: summary.firstTouchSource,
-      firstTouchMedium: summary.firstTouchMedium,
-      firstTouchCampaign: summary.firstTouchCampaign,
-      firstTouchTerm: summary.firstTouchTerm,
-      firstTouchContent: summary.firstTouchContent,
-      leadToDealTouchpoints: identity.leadToDealTouchpoints,
-      dealToWonTouchpoints: identity.dealToWonTouchpoints,
-      pipedrivePersonId: identity.pipedrivePersonId,
-    });
+    // One entry per identity here (not per touchpoint, unlike
+    // campaignCounts/topCampaigns above) — a conversion rate needs "how
+    // many distinct prospects" as its denominator, not "how many
+    // touchpoints happened to mention this source/campaign."
+    sourceTotals.set(summary.firstTouchSource, (sourceTotals.get(summary.firstTouchSource) ?? 0) + 1);
+    if (converted) sourceConverted.set(summary.firstTouchSource, (sourceConverted.get(summary.firstTouchSource) ?? 0) + 1);
+    if (summary.firstTouchCampaign) {
+      campaignTotals.set(summary.firstTouchCampaign, (campaignTotals.get(summary.firstTouchCampaign) ?? 0) + 1);
+      if (converted) {
+        campaignConverted.set(summary.firstTouchCampaign, (campaignConverted.get(summary.firstTouchCampaign) ?? 0) + 1);
+      }
+    }
+
+    recent.push(toRecentProspect(identity, summary));
   }
 
   recent.sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime());
 
+  // Daily touchpoint volume, last 30 days, zero-filled — a real chart
+  // needs every day present (even at 0) so the x-axis reads as a
+  // continuous timeline rather than skipping straight over quiet days.
+  const dayCounts = new Map<string, number>();
+  const now = new Date();
+  for (let i = TOUCHPOINTS_BY_DAY_WINDOW_DAYS - 1; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+    dayCounts.set(dayKey(d), 0);
+  }
+  const windowStart = new Date(now.getTime() - TOUCHPOINTS_BY_DAY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const filterActive = !utmFilterIsEmpty(utmFilter);
+  for (const tp of touchpoints) {
+    if (tp.occurredAt < windowStart) continue;
+    // Under an active UTM filter, only count a touchpoint if it belongs
+    // to an identity whose first touch matched — same "segment the
+    // whole dashboard to one cohort" idea as every other report here,
+    // not "count individual touchpoints that happen to carry this UTM
+    // value" (a converted prospect's later, unrelated visits shouldn't
+    // silently drop out of their own cohort's daily volume just because
+    // that particular visit had different UTM tags, or none at all).
+    if (filterActive && (!tp.identityId || !matchedIdentityIds.has(tp.identityId))) continue;
+    const key = dayKey(tp.occurredAt);
+    if (dayCounts.has(key)) dayCounts.set(key, (dayCounts.get(key) ?? 0) + 1);
+  }
+  const touchpointsByDay: TouchpointsByDay[] = Array.from(dayCounts.entries())
+    .map(([date, count]) => ({ date, count }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+
   return {
-    totalIdentities: identities.length,
-    identifiedIdentities: identities.filter((i) => i.email).length,
-    totalTouchpoints: touchpoints.length,
+    totalIdentities: filterActive ? matchedCount : identities.length,
+    identifiedIdentities: filterActive ? matchedIdentifiedCount : identities.filter((i) => i.email).length,
+    totalTouchpoints: filterActive
+      ? touchpoints.filter((tp) => tp.identityId && matchedIdentityIds.has(tp.identityId)).length
+      : touchpoints.length,
     firstTouchChannelCounts: toSortedChannelCounts(firstCounts),
     lastTouchChannelCounts: toSortedChannelCounts(lastCounts),
     topCampaigns: Array.from(campaignCounts.entries())
@@ -138,5 +470,16 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
       .sort((a, b) => b.count - a.count)
       .slice(0, 10),
     recent: recent.slice(0, 25),
+    conversionBySource: toSourceConversions(sourceTotals, sourceConverted).slice(0, 15),
+    campaignPerformance: toCampaignPerformance(campaignTotals, campaignConverted).slice(0, 15),
+    funnel: [
+      { stage: "Total tracked", count: filterActive ? matchedCount : identities.length },
+      { stage: "Identified", count: filterActive ? matchedIdentifiedCount : identities.filter((i) => i.email).length },
+      { stage: "Lead created", count: leadCreatedCount },
+      { stage: "Deal created", count: dealCreatedCount },
+      { stage: "Won", count: wonCount },
+    ],
+    touchpointsByDay,
+    distinctUtmValues,
   };
 }
