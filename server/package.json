@@ -17,7 +17,8 @@
     "verify-portal-http:cleanup": "ts-node src/verify-portal-http.ts --cleanup",
     "add-tenant": "ts-node src/add-tenant.ts",
     "list-tenants": "ts-node src/list-tenants.ts",
-    "set-tenant-billing": "ts-node src/set-tenant-billing.ts"
+    "set-tenant-billing": "ts-node src/set-tenant-billing.ts",
+    "set-tenant-login": "ts-node src/set-tenant-login.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

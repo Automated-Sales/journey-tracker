@@ -493,6 +493,25 @@ export const db = {
       });
     },
 
+    // Sets/changes the dashboard login for a tenant — the CLI-onboarding
+    // equivalent of what provisionSelfServeTenant (lib/portal-signup.ts)
+    // does automatically for self-serve signups. add-tenant.ts never sets
+    // signupEmail/passwordHash itself, so any tenant created that way has
+    // no way to log into /dashboard until this is run once — see
+    // set-tenant-login.ts, the only caller.
+    updateLogin(id: string, data: { signupEmail: string; passwordHash: string }) {
+      return withDb(() => {
+        const existing = queryOne("SELECT * FROM tenants WHERE id = ?", [id]);
+        if (!existing) throw new Error(`Tenant ${id} not found`);
+        sqlite.run("UPDATE tenants SET signupEmail = ?, passwordHash = ? WHERE id = ?", [
+          data.signupEmail.toLowerCase().trim(),
+          data.passwordHash,
+          id,
+        ]);
+        persist();
+      });
+    },
+
     delete(id: string) {
       return withDb(() => {
         sqlite.run("DELETE FROM sessions WHERE tenantId = ?", [id]);
