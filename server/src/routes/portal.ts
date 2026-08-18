@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { db, Tenant, Touchpoint } from "../db";
-import { getMe, deepLinkForPerson, listDealFields } from "../lib/pipedrive";
+import { getMe, deepLinkForPerson, listDealFields, listPersonFields } from "../lib/pipedrive";
 import { setupPipedriveFields } from "../lib/pipedrive-field-setup";
 import { validateSignupForm, provisionSelfServeTenant } from "../lib/portal-signup";
 import { buildPortalSummary, filterProspects, filterIdentities, paginateProspects, ProspectFilter, UtmFilter } from "../lib/portal-summary";
@@ -380,6 +380,122 @@ portalRouter.post("/api/settings/lead-source-field", requireSession, requireActi
 });
 
 /**
+ * The segment field setting (Johari's use case: Pipedrive Label,
+ * generalized to any field a client wants to segment by — see db.ts's
+ * Tenant.segmentFieldKey doc comment). Same GET/POST pattern as
+ * lead-source-field above, but this one also has to capture and cache
+ * the field's OPTIONS (id -> readable name) on save, since Pipedrive
+ * stores an option ID on the record, not the name — see
+ * lib/portal-summary.ts's resolveSegmentName.
+ */
+/**
+ * Pipedrive Labels — and other segmentation-style fields — can live on
+ * either the Person or the Deal/Lead record (they're separate field
+ * definitions with separate keys, even when both happen to be called
+ * "Label"). Johari's own turned out to be the PERSON one, not the Deal
+ * one this route originally only queried — so both are now offered,
+ * clearly distinguished, and it doesn't matter which the tenant picks:
+ * captureSegmentValue (webhooks.ts) is called from the person, deal,
+ * AND lead handlers, and simply no-ops on whichever ones don't have
+ * this particular field key in their payload.
+ */
+// Pipedrive's own built-in Label field uses the same literal key
+// ("label") on BOTH Person and Deal — they're genuinely separate
+// fields in separate namespaces, but sharing that key name meant the
+// two dropdown options collided under one value, so picking either one
+// silently saved the same ambiguous key (and worse: reading it back
+// could pull the WRONG entity's Label depending on which webhook
+// happened to fire next). Fixed by prefixing the stored key with which
+// entity it came from ("person::label" vs "deal::label") — see
+// webhooks.ts's captureSegmentValue, which now checks this prefix
+// against the entity of whichever webhook it's currently processing
+// before reading anything.
+//
+// A further wrinkle, confirmed via debug-segment-field.ts against a
+// real record: Pipedrive's BUILT-IN Label field has a split identity —
+// its field DEFINITION (where the {id, name} options live, needed to
+// resolve a captured value into something readable) is keyed "label",
+// but every actual record stores its value under a totally different,
+// literal top-level property: "label_ids" (a plain array, e.g. [412] —
+// not nested in custom_fields the way regular custom fields are).
+// Reading `data["label"]` off any real payload — webhook or live GET —
+// finds nothing. Special-cased below: when a field's own key is
+// exactly "label", the field is exposed to the settings dropdown under
+// "label_ids" instead, so whichever key gets saved and later read back
+// by captureSegmentValue is the one that actually appears on real data.
+function normalizeFieldKeyForCapture(key: string): string {
+  return key === "label" ? "label_ids" : key;
+}
+
+async function listSegmentableFields(token: string): Promise<{ key: string; name: string; options: any }[]> {
+  const [personFields, dealFields] = await Promise.all([listPersonFields(token), listDealFields(token)]);
+  const named = (fields: any[], entityPrefix: string, suffix: string) =>
+    fields
+      .filter((f: any) => typeof f.name === "string" && typeof f.key === "string")
+      .map((f: any) => ({ key: `${entityPrefix}::${normalizeFieldKeyForCapture(f.key)}`, name: `${f.name} (${suffix})`, options: f.options }));
+  return [...named(personFields, "person", "Person"), ...named(dealFields, "deal", "Deal/Lead")].sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
+}
+
+portalRouter.get("/api/settings/segment-field", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const current = tenant.segmentFieldKey ? { key: tenant.segmentFieldKey, name: tenant.segmentFieldLabel } : null;
+
+  if (!tenant.pipedriveApiToken) {
+    return res.json({ current, fields: [], error: "No Pipedrive API token configured for this tenant yet." });
+  }
+
+  try {
+    const fields = await listSegmentableFields(tenant.pipedriveApiToken);
+    res.json({ current, fields: fields.map((f) => ({ key: f.key, name: f.name })) });
+  } catch (err: any) {
+    console.error(`[settings] failed to list Pipedrive fields for tenant ${tenant.id}:`, err);
+    res.status(502).json({ current, fields: [], error: "Couldn't fetch fields from Pipedrive — check the API token is still valid." });
+  }
+});
+
+portalRouter.post("/api/settings/segment-field", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const key = req.body?.key;
+
+  if (!key) {
+    await db.tenant.updateSegmentField(tenant.id, { segmentFieldKey: null, segmentFieldLabel: null, segmentFieldOptions: null });
+    return res.json({ ok: true, current: null });
+  }
+
+  if (!tenant.pipedriveApiToken) {
+    return res.status(400).json({ error: "No Pipedrive API token configured for this tenant." });
+  }
+
+  try {
+    const fields = await listSegmentableFields(tenant.pipedriveApiToken);
+    const match = fields.find((f) => f.key === key);
+    if (!match) {
+      return res.status(400).json({ error: "That field no longer exists in Pipedrive — refresh the page and try again." });
+    }
+    // Only enum/set-type fields (Label included) carry an `options`
+    // array — a plain text field wouldn't, and that's fine: raw and
+    // readable value are then the same thing, so resolveSegmentName's
+    // fallback (return the raw value as-is when no match is found)
+    // already handles it correctly with an empty options list.
+    const options = Array.isArray(match.options)
+      ? match.options.map((o: any) => ({ id: String(o.id), name: String(o.label) }))
+      : [];
+    await db.tenant.updateSegmentField(tenant.id, {
+      segmentFieldKey: match.key,
+      segmentFieldLabel: match.name,
+      segmentFieldOptions: JSON.stringify(options),
+    });
+    res.json({ ok: true, current: { key: match.key, name: match.name } });
+  } catch (err: any) {
+    console.error(`[settings] failed to save segment field for tenant ${tenant.id}:`, err);
+    res.status(502).json({ error: "Couldn't verify that field against Pipedrive — try again." });
+  }
+});
+
+
+/**
  * CSV downloads for the two dashboard tables — uncapped (unlike the
  * summary endpoint, which caps "recent"/"topCampaigns" for what's
  * reasonable to render as HTML) so a client gets everything, not just
@@ -408,7 +524,7 @@ portalRouter.get("/api/export/prospects.csv", requireSession, requireActiveBilli
   const matched = filterIdentities(identities, touchpoints, { type: "funnel", value: "total" }, parseUtmFilterQuery(req));
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="prospects.csv"');
-  res.send(buildProspectsCsv(matched, touchpoints, tenant.pipedriveCompanyDomain, includeAnonymous));
+  res.send(buildProspectsCsv(matched, touchpoints, tenant.pipedriveCompanyDomain, includeAnonymous, parseSegmentOptions(tenant)));
 });
 
 portalRouter.get("/api/export/campaigns.csv", requireSession, requireActiveBilling, async (req, res) => {
@@ -453,7 +569,22 @@ function parseUtmFilterQuery(req: Request): UtmFilter {
   if (req.query.utm_campaign) filter.campaign = String(req.query.utm_campaign);
   if (req.query.utm_term) filter.term = String(req.query.utm_term);
   if (req.query.utm_content) filter.content = String(req.query.utm_content);
+  if (req.query.segment) filter.segment = String(req.query.segment);
   return filter;
+}
+
+// Parses a tenant's cached segmentFieldOptions JSON into the {id, name}
+// array buildPortalSummary/filterProspects/paginateProspects expect —
+// one place for this so a malformed/missing value never crashes a
+// request, just degrades to "no options, raw IDs shown as-is."
+function parseSegmentOptions(tenant: { segmentFieldOptions: string | null }): { id: string; name: string }[] {
+  if (!tenant.segmentFieldOptions) return [];
+  try {
+    const parsed = JSON.parse(tenant.segmentFieldOptions);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 portalRouter.get("/api/summary", requireSession, requireActiveBilling, async (req, res) => {
@@ -462,7 +593,7 @@ portalRouter.get("/api/summary", requireSession, requireActiveBilling, async (re
     db.identity.findMany({ where: { tenantId: tenant.id } }),
     db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
   ]);
-  const summary = buildPortalSummary(identities, touchpoints, parseUtmFilterQuery(req));
+  const summary = buildPortalSummary(identities, touchpoints, parseUtmFilterQuery(req), parseSegmentOptions(tenant));
   // Attach the actual clickable Pipedrive link here, not in
   // buildPortalSummary — that function stays a pure, tenant-domain-agnostic
   // unit (see verify-portal.ts), while only this route knows the tenant's
@@ -500,7 +631,13 @@ portalRouter.get("/api/prospects", requireSession, requireActiveBilling, async (
     db.identity.findMany({ where: { tenantId: tenant.id } }),
     db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
   ]);
-  const { prospects, total } = paginateProspects(identities, touchpoints, { utmFilter, includeAnonymous, page, pageSize });
+  const { prospects, total } = paginateProspects(identities, touchpoints, {
+    utmFilter,
+    includeAnonymous,
+    page,
+    pageSize,
+    segmentOptions: parseSegmentOptions(tenant),
+  });
   const prospectsWithLinks = prospects.map((r) => ({
     ...r,
     pipedriveUrl: r.pipedrivePersonId ? deepLinkForPerson(tenant.pipedriveCompanyDomain, r.pipedrivePersonId) : null,
@@ -548,7 +685,7 @@ portalRouter.get("/api/prospects/filtered", requireSession, requireActiveBilling
     db.identity.findMany({ where: { tenantId: tenant.id } }),
     db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
   ]);
-  const prospects = filterProspects(identities, touchpoints, filter, utmFilter);
+  const prospects = filterProspects(identities, touchpoints, filter, utmFilter, parseSegmentOptions(tenant));
   // Same pipedriveUrl attachment as /api/summary above, kept consistent
   // so the filtered table can render with identical "Pipedrive" column
   // links.
@@ -587,7 +724,7 @@ portalRouter.get("/api/export/prospects-filtered.csv", requireSession, requireAc
   const matched = filterIdentities(identities, touchpoints, filter, utmFilter);
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="prospects-filtered.csv"');
-  res.send(buildProspectsCsv(matched, touchpoints, tenant.pipedriveCompanyDomain, includeAnonymous));
+  res.send(buildProspectsCsv(matched, touchpoints, tenant.pipedriveCompanyDomain, includeAnonymous, parseSegmentOptions(tenant)));
 });
 
 /**

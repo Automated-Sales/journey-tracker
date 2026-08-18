@@ -156,6 +156,7 @@ async function init() {
   ensureColumn("identities", "dealCurrency", "TEXT");
   ensureColumn("identities", "dealValueAtCreate", "REAL");
   ensureColumn("identities", "dealCurrencyAtCreate", "TEXT");
+  ensureColumn("identities", "segmentValue", "TEXT");
   // Added when Lead-level (pre-Deal-conversion) attribution sync was
   // built — see pipedrive-sync.ts's syncLeadAttribution and
   // webhooks.ts's "lead" entity handler. Any tenant row created before
@@ -206,6 +207,9 @@ async function init() {
   // own tracking never saw.
   ensureColumn("tenants", "leadSourceFieldKey", "TEXT");
   ensureColumn("tenants", "leadSourceFieldLabel", "TEXT");
+  ensureColumn("tenants", "segmentFieldKey", "TEXT");
+  ensureColumn("tenants", "segmentFieldLabel", "TEXT");
+  ensureColumn("tenants", "segmentFieldOptions", "TEXT");
 
   persist();
 }
@@ -276,6 +280,32 @@ export interface Tenant {
   // Social Form Source") — never used for matching/lookup.
   leadSourceFieldKey: string | null;
   leadSourceFieldLabel: string | null;
+  // A DIFFERENT per-tenant field mapping — generalizes Johari's specific
+  // need (segmenting enquiries by Pipedrive Label, e.g. "which product
+  // is this enquiry for") into something any tenant can configure for
+  // their own Lead/Deal field, not necessarily Label specifically.
+  // Unlike leadSourceFieldKey above, this value is NOT frozen — it's
+  // captured fresh on every relevant Lead/Deal webhook event, so it
+  // always reflects the CURRENT value in Pipedrive (a Label can be
+  // edited after the fact; a permanent freeze would go stale). Also
+  // unlike leadSourceFieldKey, this is a per-IDENTITY value (see
+  // identities.segmentValue below), not a per-touchpoint one — same
+  // "one canonical current value, most recent write wins" simplification
+  // already used for dealCreatedDealId/wonDealId elsewhere in this file
+  // (a person with multiple enquiries over time only shows their LATEST
+  // segment, not a full history of every one).
+  //
+  // segmentFieldOptions is the field's live {id, name} option list,
+  // captured once when the field is chosen (Pipedrive Label/dropdown
+  // fields store an ID on the record, not the human-readable name) — used
+  // purely to resolve identities.segmentValue into something readable
+  // for display, never for matching/filtering (that's done against the
+  // raw stored value). JSON-encoded array; null if the chosen field
+  // isn't an options-type field (e.g. a plain text field), in which case
+  // the raw captured value IS already the readable value.
+  segmentFieldKey: string | null;
+  segmentFieldLabel: string | null;
+  segmentFieldOptions: string | null;
 }
 
 export interface Session {
@@ -341,6 +371,15 @@ export interface Identity {
   // would make dealValue's own meaning ambiguous.
   dealValueAtCreate: number | null;
   dealCurrencyAtCreate: string | null;
+  // The tenant's configured segment field's CURRENT raw value for this
+  // identity — see Tenant.segmentFieldKey's doc comment. Comma-joined if
+  // the underlying Pipedrive field is multi-select (a Deal/Lead can have
+  // more than one Label). Resolved to a human-readable name at
+  // display/CSV time using tenant.segmentFieldOptions — this column
+  // always holds the raw value(s), never the resolved name, so a later
+  // rename of the option in Pipedrive doesn't require re-syncing every
+  // identity that already captured it.
+  segmentValue: string | null;
 }
 
 // The single, shared definition of "not anonymous" — used by the
@@ -431,6 +470,9 @@ function rowToTenant(row: any): Tenant | null {
     createdAt: new Date(row.createdAt),
     leadSourceFieldKey: row.leadSourceFieldKey ?? null,
     leadSourceFieldLabel: row.leadSourceFieldLabel ?? null,
+    segmentFieldKey: row.segmentFieldKey ?? null,
+    segmentFieldLabel: row.segmentFieldLabel ?? null,
+    segmentFieldOptions: row.segmentFieldOptions ?? null,
   };
 }
 
@@ -461,6 +503,7 @@ function rowToIdentity(row: any): Identity | null {
     dealValueAtCreate:
       typeof row.dealValueAtCreate === "number" ? row.dealValueAtCreate : row.dealValueAtCreate ? Number(row.dealValueAtCreate) : null,
     dealCurrencyAtCreate: row.dealCurrencyAtCreate ?? null,
+    segmentValue: row.segmentValue ?? null,
   };
 }
 
@@ -656,6 +699,26 @@ export const db = {
         sqlite.run("UPDATE tenants SET leadSourceFieldKey = ?, leadSourceFieldLabel = ? WHERE id = ?", [
           data.leadSourceFieldKey,
           data.leadSourceFieldLabel,
+          id,
+        ]);
+        persist();
+      });
+    },
+
+    // Sets/clears the segment field mapping — see the Tenant interface's
+    // doc comment on segmentFieldKey. Only reachable via the settings
+    // route (routes/portal.ts's /api/settings/segment-field).
+    updateSegmentField(
+      id: string,
+      data: { segmentFieldKey: string | null; segmentFieldLabel: string | null; segmentFieldOptions: string | null }
+    ) {
+      return withDb(() => {
+        const existing = queryOne("SELECT * FROM tenants WHERE id = ?", [id]);
+        if (!existing) throw new Error(`Tenant ${id} not found`);
+        sqlite.run("UPDATE tenants SET segmentFieldKey = ?, segmentFieldLabel = ?, segmentFieldOptions = ? WHERE id = ?", [
+          data.segmentFieldKey,
+          data.segmentFieldLabel,
+          data.segmentFieldOptions,
           id,
         ]);
         persist();
@@ -868,6 +931,23 @@ export const db = {
         ]);
         persist();
         return rowToIdentity({ ...merged, leadCreatedAt: leadCreatedAtIso })!;
+      });
+    },
+
+    // UNLIKE setLeadMilestone/setDealMilestone above, this is NOT a
+    // one-time freeze — see Tenant.segmentFieldKey's doc comment for why
+    // a segment value should always reflect the CURRENT state. Called
+    // from webhooks.ts's deal and lead handlers on every relevant event,
+    // not gated behind an "already set" check. Doesn't bump lastSeenAt,
+    // same reasoning as the milestone setters (a Pipedrive-side edit
+    // isn't a genuine new visitor touch).
+    setSegmentValue({ where, segmentValue }: { where: { tenantId: string; id: string }; segmentValue: string | null }) {
+      return withDb(() => {
+        const existing = queryOne("SELECT * FROM identities WHERE tenantId = ? AND id = ?", [where.tenantId, where.id]);
+        if (!existing) throw new Error(`Identity ${where.id} not found for tenant ${where.tenantId}`);
+        sqlite.run(`UPDATE identities SET segmentValue = ? WHERE tenantId = ? AND id = ?`, [segmentValue, where.tenantId, where.id]);
+        persist();
+        return rowToIdentity({ ...existing, segmentValue })!;
       });
     },
 

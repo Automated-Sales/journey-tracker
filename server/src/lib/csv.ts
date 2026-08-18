@@ -45,7 +45,8 @@ export function buildProspectsCsv(
   identities: Identity[],
   touchpoints: Touchpoint[],
   companyDomain: string | null = null,
-  includeAnonymous: boolean = true
+  includeAnonymous: boolean = true,
+  segmentOptions: { id: string; name: string }[] = []
 ): string {
   const byIdentity = new Map<string, Touchpoint[]>();
   for (const tp of touchpoints) {
@@ -105,6 +106,16 @@ export function buildProspectsCsv(
       identity.lastSeenAt.toISOString(),
       identity.pipedrivePersonId ?? "",
       identity.pipedrivePersonId ? deepLinkForPerson(companyDomain, identity.pipedrivePersonId) ?? "" : "",
+      identity.segmentValue
+        ? identity.segmentValue
+            .split(",")
+            .map((v) => v.trim())
+            .filter(Boolean)
+            .map((v) => segmentOptions.find((o) => o.id === v)?.name ?? v)
+            .join(", ")
+        : "",
+      identity.dealValue !== null ? identity.dealValue : "",
+      identity.dealCurrency ?? "",
     ]);
   }
 
@@ -142,6 +153,9 @@ export function buildProspectsCsv(
       "Last seen",
       "Pipedrive person ID",
       "Pipedrive URL",
+      "Segment",
+      "Deal value",
+      "Deal currency",
     ],
     rows
   );

@@ -79,6 +79,7 @@ function fixtureIdentity(overrides: Partial<Identity>): Identity {
     dealCurrency: null,
     dealValueAtCreate: null,
     dealCurrencyAtCreate: null,
+    segmentValue: null,
     ...overrides,
   };
 }
@@ -385,6 +386,29 @@ async function main() {
     "filterProspects: a UTM filter composes with a ProspectFilter (funnel/source/campaign click) — both apply together, not either/or"
   );
 
+  // --- segment filter (Pipedrive Label or any configured field) --------
+  const idAWithSegment = fixtureIdentity({ id: "idA", email: "a@example.com", segmentValue: "12,45" }); // multi-select: two labels
+  const idBWithSegment = fixtureIdentity({ id: "idB", email: "b@example.com", lastSeenAt: new Date("2026-01-12"), segmentValue: "7" });
+  const segmentOptions = [
+    { id: "12", name: "Product A" },
+    { id: "45", name: "Product B" },
+    { id: "7", name: "Product C" },
+  ];
+  const segmentFilteredSummary = buildPortalSummary([idAWithSegment, idBWithSegment, idC], tps, { segment: "12" }, segmentOptions);
+  assert(
+    segmentFilteredSummary.totalIdentities === 1 && segmentFilteredSummary.recent[0]?.identityId === "idA",
+    "buildPortalSummary: filtering by segment '12' matches idA (whose segmentValue is the multi-select list '12,45'), not idB — membership check, not exact string match"
+  );
+  assert(
+    segmentFilteredSummary.distinctUtmValues.segments.find((s) => s.id === "12")?.name === "Product A",
+    "distinctUtmValues.segments: resolves the raw Pipedrive option ID to its readable name via the passed segmentOptions"
+  );
+  const unfilteredSegmentSummary = buildPortalSummary([idAWithSegment, idBWithSegment, idC], tps, undefined, segmentOptions);
+  assert(
+    unfilteredSegmentSummary.recent.find((r) => r.identityId === "idA")?.segmentLabel === "Product A, Product B",
+    "toRecentProspect: segmentLabel resolves EVERY id in a multi-select value and joins them, not just the first"
+  );
+
   // --- CSV export (uncapped — unlike buildPortalSummary's top 25/10) ---
   const prospectsCsv = buildProspectsCsv([idA, idB, idC], tps);
   const prospectsLines = prospectsCsv.trim().split("\r\n");
@@ -423,6 +447,9 @@ async function main() {
         "Last seen",
         "Pipedrive person ID",
         "Pipedrive URL",
+        "Segment",
+        "Deal value",
+        "Deal currency",
       ].join(","),
     "buildProspectsCsv: header row matches expected columns — now including medium/term/content/referrer/landing page/click IDs for both first and last touch, the deal-lifecycle milestones, and a Pipedrive URL, not just the original handful of fields"
   );

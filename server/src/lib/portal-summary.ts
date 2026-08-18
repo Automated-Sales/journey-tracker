@@ -114,30 +114,51 @@ export interface TouchpointsByDay {
 // also clicked a Facebook ad still counts as "google" here — segmenting
 // by "what originally brought this prospect in," not "every channel
 // they've ever touched." All populated dimensions are ANDed together.
+//
+// `segment` is the odd one out — not a UTM dimension at all, but the
+// tenant's configured Pipedrive segment field (see db.ts's
+// Tenant.segmentFieldKey doc comment, e.g. Johari's Label). Folded into
+// this same filter object rather than a parallel one, since that would
+// mean threading a second filter through every place this one already
+// flows (routes, the drill-down popup, both CSV exports, the dashboard's
+// filter bar) for one extra field. Holds the RAW Pipedrive option ID,
+// not the readable name — see matchesUtmFilter below for why.
 export interface UtmFilter {
   source?: string;
   medium?: string;
   campaign?: string;
   term?: string;
   content?: string;
+  segment?: string;
 }
 
 function utmFilterIsEmpty(filter?: UtmFilter): boolean {
-  return !filter || !(filter.source || filter.medium || filter.campaign || filter.term || filter.content);
+  return !filter || !(filter.source || filter.medium || filter.campaign || filter.term || filter.content || filter.segment);
 }
 
 function matchesUtmFilter(
+  identity: Identity,
   summary: NonNullable<ReturnType<typeof buildAttributionSummary>> | null,
   filter?: UtmFilter
 ): boolean {
   if (utmFilterIsEmpty(filter)) return true;
-  if (!summary) return false;
   const f = filter!;
-  if (f.source && summary.firstTouchSource !== f.source) return false;
-  if (f.medium && summary.firstTouchMedium !== f.medium) return false;
-  if (f.campaign && summary.firstTouchCampaign !== f.campaign) return false;
-  if (f.term && summary.firstTouchTerm !== f.term) return false;
-  if (f.content && summary.firstTouchContent !== f.content) return false;
+  if (f.segment) {
+    // Membership, not exact-match — identity.segmentValue is
+    // comma-joined when the underlying Pipedrive field is multi-select
+    // (a Deal/Lead can carry more than one Label), so "has label 12"
+    // needs to check the list, not compare the whole string.
+    const values = (identity.segmentValue || "").split(",").map((v) => v.trim()).filter(Boolean);
+    if (!values.includes(f.segment)) return false;
+  }
+  if (f.source || f.medium || f.campaign || f.term || f.content) {
+    if (!summary) return false;
+    if (f.source && summary.firstTouchSource !== f.source) return false;
+    if (f.medium && summary.firstTouchMedium !== f.medium) return false;
+    if (f.campaign && summary.firstTouchCampaign !== f.campaign) return false;
+    if (f.term && summary.firstTouchTerm !== f.term) return false;
+    if (f.content && summary.firstTouchContent !== f.content) return false;
+  }
   return true;
 }
 
@@ -153,9 +174,21 @@ export interface DistinctUtmValues {
   campaigns: string[];
   terms: string[];
   contents: string[];
+  // {id, name} pairs — only segment values actually present in this
+  // tenant's data (not every option the Pipedrive field theoretically
+  // offers), resolved to their readable name via segmentOptions.
+  segments: { id: string; name: string }[];
 }
 
-function collectDistinctUtmValues(touchpoints: Touchpoint[]): DistinctUtmValues {
+function resolveSegmentName(id: string, segmentOptions?: { id: string; name: string }[]): string {
+  return segmentOptions?.find((o) => o.id === id)?.name ?? id;
+}
+
+function collectDistinctUtmValues(
+  touchpoints: Touchpoint[],
+  identities: Identity[],
+  segmentOptions?: { id: string; name: string }[]
+): DistinctUtmValues {
   const sources = new Set<string>();
   const mediums = new Set<string>();
   const campaigns = new Set<string>();
@@ -168,6 +201,11 @@ function collectDistinctUtmValues(touchpoints: Touchpoint[]): DistinctUtmValues 
     if (tp.term) terms.add(tp.term);
     if (tp.content) contents.add(tp.content);
   }
+  const segmentIds = new Set<string>();
+  for (const identity of identities) {
+    if (!identity.segmentValue) continue;
+    for (const v of identity.segmentValue.split(",").map((s) => s.trim()).filter(Boolean)) segmentIds.add(v);
+  }
   const alpha = (a: string, b: string) => a.localeCompare(b);
   return {
     sources: Array.from(sources).sort(alpha),
@@ -175,6 +213,9 @@ function collectDistinctUtmValues(touchpoints: Touchpoint[]): DistinctUtmValues 
     campaigns: Array.from(campaigns).sort(alpha),
     terms: Array.from(terms).sort(alpha),
     contents: Array.from(contents).sort(alpha),
+    segments: Array.from(segmentIds)
+      .map((id) => ({ id, name: resolveSegmentName(id, segmentOptions) }))
+      .sort((a, b) => alpha(a.name, b.name)),
   };
 }
 
@@ -230,6 +271,12 @@ export interface RecentProspect {
   // pipedriveUrl using lib/pipedrive.ts's deepLinkForPerson once this
   // summary comes back.
   pipedrivePersonId: number | null;
+  // Raw Pipedrive option ID(s) (comma-joined if multi-select) and the
+  // resolved, readable name(s) — see Tenant.segmentFieldKey's doc
+  // comment in db.ts. Null if the tenant hasn't configured a segment
+  // field, or this identity's Lead/Deal never had it set.
+  segmentValue: string | null;
+  segmentLabel: string | null;
 }
 
 export interface PortalSummary {
@@ -344,7 +391,11 @@ function mondayOfWeek(d: Date): Date {
   return monday;
 }
 
-function toRecentProspect(identity: Identity, summary: ReturnType<typeof buildAttributionSummary>): RecentProspect {
+function toRecentProspect(
+  identity: Identity,
+  summary: ReturnType<typeof buildAttributionSummary>,
+  segmentOptions?: { id: string; name: string }[]
+): RecentProspect {
   return {
     identityId: identity.id,
     email: identity.email,
@@ -367,6 +418,15 @@ function toRecentProspect(identity: Identity, summary: ReturnType<typeof buildAt
     leadToDealTouchpoints: identity.leadToDealTouchpoints,
     dealToWonTouchpoints: identity.dealToWonTouchpoints,
     pipedrivePersonId: identity.pipedrivePersonId,
+    segmentValue: identity.segmentValue,
+    segmentLabel: identity.segmentValue
+      ? identity.segmentValue
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean)
+          .map((v) => resolveSegmentName(v, segmentOptions))
+          .join(", ")
+      : null,
   };
 }
 
@@ -408,7 +468,7 @@ function matchingIdentities(
     const tps = (byIdentity.get(identity.id) ?? []).slice().sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
     const summary = buildAttributionSummary(tps);
 
-    if (!matchesUtmFilter(summary, utmFilter)) continue;
+    if (!matchesUtmFilter(identity, summary, utmFilter)) continue;
 
     // "total" is the one funnel value that matches even an identity with
     // zero touchpoints (no summary) — every other filter branch below
@@ -452,11 +512,12 @@ export function filterProspects(
   identities: Identity[],
   touchpoints: Touchpoint[],
   filter: ProspectFilter,
-  utmFilter?: UtmFilter
+  utmFilter?: UtmFilter,
+  segmentOptions?: { id: string; name: string }[]
 ): RecentProspect[] {
   return matchingIdentities(identities, touchpoints, filter, utmFilter)
     .filter((m) => m.summary) // "total" can include no-touchpoint identities with summary=null — nothing meaningful to show as a RecentProspect row for those (same exclusion buildPortalSummary's own `recent` list already applies)
-    .map((m) => toRecentProspect(m.identity, m.summary));
+    .map((m) => toRecentProspect(m.identity, m.summary, segmentOptions));
 }
 
 // Same filter, but returns the raw Identity rows instead of the
@@ -484,9 +545,9 @@ export function filterIdentities(
 export function paginateProspects(
   identities: Identity[],
   touchpoints: Touchpoint[],
-  opts: { utmFilter?: UtmFilter; includeAnonymous: boolean; page: number; pageSize: number }
+  opts: { utmFilter?: UtmFilter; includeAnonymous: boolean; page: number; pageSize: number; segmentOptions?: { id: string; name: string }[] }
 ): { prospects: RecentProspect[]; total: number } {
-  let all = filterProspects(identities, touchpoints, { type: "funnel", value: "total" }, opts.utmFilter);
+  let all = filterProspects(identities, touchpoints, { type: "funnel", value: "total" }, opts.utmFilter, opts.segmentOptions);
   // Filtered server-side here (rather than left to the client, the way
   // the drill-down popup's already-complete, unbounded list does it) —
   // pagination boundaries need to be computed against the SAME set
@@ -502,11 +563,16 @@ export function paginateProspects(
   return { prospects: all.slice(start, start + opts.pageSize), total };
 }
 
-export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoint[], utmFilter?: UtmFilter): PortalSummary {
+export function buildPortalSummary(
+  identities: Identity[],
+  touchpoints: Touchpoint[],
+  utmFilter?: UtmFilter,
+  segmentOptions?: { id: string; name: string }[]
+): PortalSummary {
   // Always computed from the full, unfiltered touchpoint list — see
   // DistinctUtmValues' doc comment for why this must never itself be
   // affected by utmFilter.
-  const distinctUtmValues = collectDistinctUtmValues(touchpoints);
+  const distinctUtmValues = collectDistinctUtmValues(touchpoints, identities, segmentOptions);
 
   const byIdentity = new Map<string, Touchpoint[]>();
   for (const tp of touchpoints) {
@@ -562,7 +628,7 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
       .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
     const summary = buildAttributionSummary(tps);
     if (!summary) continue;
-    if (!matchesUtmFilter(summary, utmFilter)) continue;
+    if (!matchesUtmFilter(identity, summary, utmFilter)) continue;
 
     matchedCount++;
     matchedIdentityIds.add(identity.id);
@@ -657,7 +723,7 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
       if (converted) bucket.converted++;
     }
 
-    recent.push(toRecentProspect(identity, summary));
+    recent.push(toRecentProspect(identity, summary, segmentOptions));
   }
 
   recent.sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime());

@@ -204,6 +204,52 @@ async function backfillContactFromPipedrive(tenant: Tenant, identity: Identity, 
 }
 
 /**
+ * Captures the tenant's configured segment field (see db.ts's
+ * Tenant.segmentFieldKey doc comment, e.g. Johari's Label) from a
+ * Deal/Lead webhook payload. UNLIKE backfillContactFromPipedrive above,
+ * this always overwrites with whatever's on THIS payload — a segment
+ * value represents the CURRENT state, not a permanent freeze, so an
+ * edit in Pipedrive should show up here too. Called from the person,
+ * deal, AND lead handlers below — Labels (and similar segmentation
+ * fields) can live on any of Person/Deal/Lead in Pipedrive, each with
+ * their own separate field key, so this just needs to be everywhere and
+ * let the "field not on this payload" no-op below sort out which
+ * handler(s) actually have it. Confirmed in practice: Johari's own
+ * Label field turned out to be on the Person record, not Deal/Lead as
+ * first assumed — a no-op whenever the tenant hasn't configured a
+ * segment field, or this particular payload doesn't include it
+ * (Pipedrive's partial-diff webhooks — see extractPersonEmail's doc
+ * comment — commonly omit fields that didn't just change).
+ *
+ * Pipedrive represents this kind of field's value as either a single ID
+ * (string/number) or, for multi-select fields, an array of IDs —
+ * genuinely unverified which shape Label specifically uses on a live
+ * webhook payload (same caution as this session's earlier, since-removed
+ * listDealLabelOptions exploration) — handled defensively for both.
+ */
+async function captureSegmentValue(tenant: Tenant, identity: Identity, data: any, entity: "person" | "deal"): Promise<void> {
+  if (!tenant.segmentFieldKey) return;
+  // Composite "person::rawkey" / "deal::rawkey" — see
+  // routes/portal.ts's listSegmentableFields doc comment for why this
+  // prefix exists (Person and Deal can both have a field literally
+  // keyed "label"). Only act when the configured field's entity
+  // matches whichever webhook is currently being processed — Leads
+  // share Deal field definitions in Pipedrive (same convention already
+  // used throughout this file for Lead-level attribution), so a Lead
+  // webhook is treated as "deal" here too.
+  const separatorIndex = tenant.segmentFieldKey.indexOf("::");
+  if (separatorIndex === -1) return; // malformed/legacy value from before this prefix existed — treat as unconfigured rather than guessing
+  const configuredEntity = tenant.segmentFieldKey.slice(0, separatorIndex);
+  const rawKey = tenant.segmentFieldKey.slice(separatorIndex + 2);
+  if (configuredEntity !== entity) return;
+  const raw = data[rawKey];
+  if (raw === undefined || raw === null) return;
+  const value = Array.isArray(raw) ? raw.map(String).join(",") : String(raw);
+  if (identity.segmentValue === value) return; // no-op, avoid a pointless write+persist
+  await db.identity.setSegmentValue({ where: { tenantId: tenant.id, id: identity.id }, segmentValue: value || null });
+}
+
+/**
  * All touchpoints of one channel for an identity, most-recent first — the
  * shared building block for "has this specific Pipedrive event already
  * been logged" checks below (deal stage dedup, activity-completion
@@ -277,6 +323,11 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
         // happen to touch the email field) to re-sync in case new
         // touchpoints landed on this identity since the last sync.
         const identity = await mergeIdentities(tenant, { email, name, phone, pipedrivePersonId: data.id });
+        // See captureSegmentValue's doc comment — Johari's own segment
+        // field (Label) turned out to live on the Person record, not
+        // Deal/Lead, so this handler needs the same capture call the
+        // deal/lead handlers already have.
+        await captureSegmentValue(tenant, identity, data, "person");
         // Backfill: this Person may already have anonymous touchpoints
         // (ad click, blog visits) recorded before Pipedrive knew who they
         // were. Push the summary now rather than waiting for the next
@@ -307,6 +358,7 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
           pipedriveDealId: data.id ?? undefined,
         });
         const identity = await backfillContactFromPipedrive(tenant, identity0, personId);
+        await captureSegmentValue(tenant, identity, data, "deal");
 
         // Only log a touchpoint when the stage genuinely changed — Pipedrive
         // fires a "deal updated" webhook for ANY field edit, including the
@@ -473,6 +525,7 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
           pipedriveLeadId: String(data.id),
         });
         const identity = await backfillContactFromPipedrive(tenant, identity0, personId);
+        await captureSegmentValue(tenant, identity, data, "deal");
         if (!identity.leadCreatedAt) {
           const leadCreatedAt = data.add_time ? new Date(data.add_time) : new Date();
 

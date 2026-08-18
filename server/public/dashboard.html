@@ -140,6 +140,19 @@
     </div>
 
     <div class="as-card as-install-card" style="margin-bottom:28px;">
+      <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Segment field</h3>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
+        If you use a Pipedrive field to categorize enquiries — a Label for which product an enquiry is about, for example — pick it below to segment the whole dashboard by it. It'll appear as a filter alongside Source/Medium/Campaign, and in the Recently active prospects table. Unlike Lead source fallback above, this always reflects the current value in Pipedrive, so an edit there shows up here too.
+      </p>
+      <div id="segment-field-loading" style="font-size:13px; color:var(--as-body);">Loading your Pipedrive fields…</div>
+      <div id="segment-field-controls" style="display:none; align-items:center; gap:12px; flex-wrap:wrap;">
+        <select id="segment-field-select" class="as-select"></select>
+        <button class="as-btn as-btn-primary" id="segment-field-save">Save</button>
+        <span id="segment-field-status" style="font-size:13px; color:var(--as-body);"></span>
+      </div>
+    </div>
+
+    <div class="as-card as-install-card" style="margin-bottom:28px;">
       <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Google Ads conversion feedback</h3>
       <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
         Tell Google Ads which ad clicks actually became real leads and customers, so its bidding learns to find more like them (and fewer like the ones that didn't). This downloads a file of Deal-created and Deal-won events, matched to the original ad click — upload it in Google Ads under <strong>Tools and settings → Conversions → Uploads</strong>.
@@ -187,6 +200,7 @@
         <label class="as-utm-filter-field">Campaign<select id="utm-filter-campaign" class="as-select"><option value="">All</option></select></label>
         <label class="as-utm-filter-field">Term<select id="utm-filter-term" class="as-select"><option value="">All</option></select></label>
         <label class="as-utm-filter-field">Content<select id="utm-filter-content" class="as-select"><option value="">All</option></select></label>
+        <label class="as-utm-filter-field" id="utm-filter-segment-wrap" style="display:none;">Segment<select id="utm-filter-segment" class="as-select"><option value="">All</option></select></label>
       </div>
     </div>
 
@@ -310,6 +324,7 @@
     if (currentUtmFilter.campaign) params.set('utm_campaign', currentUtmFilter.campaign);
     if (currentUtmFilter.term) params.set('utm_term', currentUtmFilter.term);
     if (currentUtmFilter.content) params.set('utm_content', currentUtmFilter.content);
+    if (currentUtmFilter.segment) params.set('segment', currentUtmFilter.segment);
     return params;
   }
 
@@ -344,6 +359,28 @@
         '<option value="">All</option>' +
         f.options.map(function (v) { return '<option value="' + esc(v) + '"' + (v === current ? ' selected' : '') + '>' + esc(v) + '</option>'; }).join('');
     });
+
+    // Segment is object-shaped ({id, name} pairs, since the option
+    // VALUE Pipedrive/the filter needs is a raw ID, not the readable
+    // name shown in the dropdown) and only appears at all once a
+    // tenant has configured a segment field AND it has at least one
+    // real value in the data — otherwise it's a pointless empty "All"
+    // dropdown for every tenant that hasn't set this up.
+    var segmentSelect = document.getElementById('utm-filter-segment');
+    var segmentWrap = document.getElementById('utm-filter-segment-wrap');
+    if (segmentSelect && segmentWrap) {
+      if (!distinct.segments || !distinct.segments.length) {
+        segmentWrap.style.display = 'none';
+      } else {
+        segmentWrap.style.display = 'flex';
+        var currentSegment = segmentSelect.value;
+        segmentSelect.innerHTML =
+          '<option value="">All</option>' +
+          distinct.segments
+            .map(function (s) { return '<option value="' + esc(s.id) + '"' + (s.id === currentSegment ? ' selected' : '') + '>' + esc(s.name) + '</option>'; })
+            .join('');
+      }
+    }
   }
 
   function renderBars(container, rows) {
@@ -801,6 +838,12 @@
       },
     },
     {
+      key: 'segment',
+      label: 'Segment',
+      headerTitle: "The tenant's configured segment field (e.g. Pipedrive Label) — set this up under Settings further down the page",
+      render: function (r) { return cellOrDash(r.segmentLabel); },
+    },
+    {
       key: 'referrer',
       label: 'Referrer',
       render: function (r) {
@@ -839,6 +882,17 @@
   // column set can be introduced with a clean slate if it ever needs one.
   var RECENT_COLUMN_PREFS_KEY = 'as_dashboard_recent_columns_v1';
 
+  // Columns hidden on a completely fresh browser (no saved preference
+  // yet) or after "Reset to default" — curated rather than "show
+  // everything," since RECENT_COLUMNS has grown to 20 columns across
+  // several sessions of additions and showing all of them by default
+  // makes the table sprawl far wider than the page on first load. Core
+  // reporting columns stay visible; more niche/debugging ones (raw
+  // click IDs, Name/Phone which duplicate Contact's own fallback
+  // chain, the touchpoint-count breakdown) are a Columns click away
+  // rather than gone.
+  var DEFAULT_HIDDEN_COLUMN_KEYS = ['name', 'phone', 'term', 'content', 'gclid', 'fbclid', 'referrer', 'leadToDeal', 'dealToWon'];
+
   function loadColumnPrefs() {
     var allKeys = RECENT_COLUMNS.map(function (c) { return c.key; });
     var saved = null;
@@ -857,7 +911,7 @@
     allKeys.forEach(function (k) {
       if (order.indexOf(k) === -1) order.push(k);
     });
-    var hidden = (saved && Array.isArray(saved.hidden) ? saved.hidden : []).filter(function (k) {
+    var hidden = (saved && Array.isArray(saved.hidden) ? saved.hidden : DEFAULT_HIDDEN_COLUMN_KEYS).filter(function (k) {
       var col = RECENT_COLUMNS_BY_KEY[k];
       return !!col && !col.alwaysVisible; // e.g. 'contact' can never end up hidden, even from stale/tampered saved state
     });
@@ -1211,6 +1265,60 @@
       });
   }
 
+  // Same GET/POST pattern as renderLeadSourceFieldSettings above, but a
+  // successful save also refetches the reports/filter bar (see
+  // refreshReports) — unlike Lead source fallback, changing this field
+  // changes what the Segment filter dropdown offers and what every
+  // report shows, not just a fallback that only kicks in for otherwise
+  // invisible leads.
+  function renderSegmentFieldSettings() {
+    var loading = document.getElementById('segment-field-loading');
+    var controls = document.getElementById('segment-field-controls');
+    var select = document.getElementById('segment-field-select');
+    var status = document.getElementById('segment-field-status');
+
+    fetch('/api/settings/segment-field', { credentials: 'include' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        loading.style.display = 'none';
+        if (data.error && !data.fields.length) {
+          loading.style.display = 'block';
+          loading.textContent = data.error;
+          return;
+        }
+        controls.style.display = 'flex';
+        var optionsHtml = '<option value="">— None (off) —</option>' +
+          data.fields.map(function (f) {
+            var selected = data.current && data.current.key === f.key ? ' selected' : '';
+            return '<option value="' + esc(f.key) + '"' + selected + '>' + esc(f.name) + '</option>';
+          }).join('');
+        select.innerHTML = optionsHtml;
+
+        document.getElementById('segment-field-save').addEventListener('click', function () {
+          status.textContent = 'Saving…';
+          fetch('/api/settings/segment-field', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: select.value || null }),
+          })
+            .then(function (r) { return r.ok ? r.json() : r.json().then(function (e) { throw new Error(e.error || 'failed'); }); })
+            .then(function () {
+              status.textContent = 'Saved.';
+              setTimeout(function () { status.textContent = ''; }, 2000);
+              refreshReports();
+              loadRecentPage(1);
+            })
+            .catch(function (err) {
+              status.textContent = err.message === 'failed' ? 'Could not save — try again.' : err.message;
+            });
+        });
+      })
+      .catch(function () {
+        loading.textContent = "Couldn't load your Pipedrive fields — try refreshing the page.";
+      });
+  }
+
   // Statuses that mean "let them into the dashboard" — kept in sync with
   // routes/portal.ts's requireActiveBilling by hand (there's no shared
   // module between server and this plain <script>, same as everywhere
@@ -1395,7 +1503,7 @@
     }
   }
 
-  ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content'].forEach(function (id) {
+  ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content', 'utm-filter-segment'].forEach(function (id) {
     document.getElementById(id).addEventListener('change', function (event) {
       var key = id.replace('utm-filter-', '');
       if (event.target.value) currentUtmFilter[key] = event.target.value;
@@ -1407,7 +1515,7 @@
 
   document.getElementById('utm-filter-clear').addEventListener('click', function () {
     currentUtmFilter = {};
-    ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content'].forEach(function (id) {
+    ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content', 'utm-filter-segment'].forEach(function (id) {
       document.getElementById(id).value = '';
     });
     refreshReports();
@@ -1460,6 +1568,7 @@
     renderInstall(me.install, s.totalTouchpoints > 0);
     renderVisitLogging(me);
     renderLeadSourceFieldSettings();
+    renderSegmentFieldSettings();
 
     document.getElementById('loading').style.display = 'none';
     document.getElementById('content').style.display = 'block';
