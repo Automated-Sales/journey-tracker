@@ -219,6 +219,7 @@ async function init() {
   ensureColumn("tenants", "leadSourceFieldLabel", "TEXT");
   ensureColumn("tenants", "leadSourceFieldOptions", "TEXT");
   ensureColumn("tenants", "leadSourceFields", "TEXT");
+  ensureColumn("tenants", "paidIndicatorField", "TEXT");
   ensureColumn("tenants", "segmentFieldKey", "TEXT");
   ensureColumn("tenants", "segmentFieldLabel", "TEXT");
   ensureColumn("tenants", "segmentFieldOptions", "TEXT");
@@ -303,6 +304,34 @@ export interface Tenant {
   //            Empty array when the field genuinely IS plain text.
   // Null (not an empty array) when no fallback is configured at all.
   leadSourceFields: string | null;
+  // A DIFFERENT field again — the fallback source above tells us WHERE
+  // a lead came from (e.g. an Instagram post URL), but says nothing
+  // about whether that came via a PAID ad or organically. Confirmed
+  // live: a bare social-post URL captured through a fallback field
+  // genuinely can't tell paid from organic on its own — a paid ad often
+  // promotes an existing organic post, using that exact same URL — so
+  // guessing would be actively wrong more often than not. This is a
+  // reliable secondary signal instead: when configured, the fallback
+  // checks THIS field's value on the same record, and if it matches one
+  // of the configured "paid" values, the resulting touchpoint is
+  // classified as channel "ad_click" / medium "paid_social" (the same
+  // channel genuinely tracked ad clicks use elsewhere) instead of the
+  // generic fallback channel — making it directly comparable to real
+  // paid tracking. Confirmed live: Johari's own Pipedrive marks
+  // Click-to-WhatsApp Ad leads with the literal value "CWTA" in a field
+  // called "Lead Source (2)".
+  //
+  // JSON-encoded { key, label, entity, values, options } | null:
+  //   key/label/entity — same meaning as leadSourceFields' own entries
+  //   values — the configured "this means paid" value(s), as plain
+  //            readable text (e.g. ["CWTA"]) — compared against the
+  //            RESOLVED value read off the webhook (after any options
+  //            lookup), not the raw Pipedrive ID, so this stays
+  //            readable/editable without needing to know raw IDs
+  //   options — same "id -> readable name" cache as leadSourceFields'
+  //            entries, needed if this field happens to be a
+  //            single/multi-select rather than plain text
+  paidIndicatorField: string | null;
   // A DIFFERENT per-tenant field mapping — generalizes Johari's specific
   // need (segmenting enquiries by Pipedrive Label, e.g. "which product
   // is this enquiry for") into something any tenant can configure for
@@ -533,6 +562,7 @@ function rowToTenant(row: any): Tenant | null {
     currentPeriodEnd: row.currentPeriodEnd ? new Date(row.currentPeriodEnd) : null,
     createdAt: new Date(row.createdAt),
     leadSourceFields: row.leadSourceFields ?? migrateLegacyLeadSourceField(row),
+    paidIndicatorField: row.paidIndicatorField ?? null,
     segmentFieldKey: row.segmentFieldKey ?? null,
     segmentFieldLabel: row.segmentFieldLabel ?? null,
     segmentFieldOptions: row.segmentFieldOptions ?? null,
@@ -769,6 +799,15 @@ export const db = {
           "UPDATE tenants SET leadSourceFields = ?, leadSourceFieldKey = NULL, leadSourceFieldLabel = NULL, leadSourceFieldOptions = NULL WHERE id = ?",
           [leadSourceFields, id]
         );
+        persist();
+      });
+    },
+
+    updatePaidIndicatorField(id: string, paidIndicatorField: string | null) {
+      return withDb(() => {
+        const existing = queryOne("SELECT * FROM tenants WHERE id = ?", [id]);
+        if (!existing) throw new Error(`Tenant ${id} not found`);
+        sqlite.run("UPDATE tenants SET paidIndicatorField = ? WHERE id = ?", [paidIndicatorField, id]);
         persist();
       });
     },

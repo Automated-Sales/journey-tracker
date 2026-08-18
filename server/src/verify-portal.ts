@@ -432,6 +432,59 @@ async function main() {
     "notableChanges: bing's real but modest 20% drop (10 → 8) is correctly NOT flagged — below the 30% notability threshold"
   );
 
+  // --- computeNotableChanges rules 2-4: revenue concentration, low-conversion, attribution-quality trend ---
+  const insightIdentities: Identity[] = [];
+  const insightTps: Touchpoint[] = [];
+  // "meta": 6 prospects, 0 deals — should trigger rule 3 (volume without deals)
+  for (let i = 0; i < 6; i++) {
+    const id = fixtureIdentity({ id: `metaId${i}`, email: `meta${i}@example.com` });
+    insightIdentities.push(id);
+    insightTps.push(fixtureTouchpoint({ identityId: id.id, channel: "ad_click", source: "meta", campaign: "c1", occurredAt: daysAgo(20) }));
+  }
+  // "referral": 5 prospects, one Won with a large value — 100% of Won revenue, should trigger rule 2 (strongest revenue source)
+  for (let i = 0; i < 5; i++) {
+    const won = i === 0;
+    const id = fixtureIdentity({
+      id: `refId${i}`,
+      email: `ref${i}@example.com`,
+      dealCreatedDealId: won ? 900 : null,
+      wonDealId: won ? 900 : null,
+      dealValue: won ? 100000 : null,
+      dealCurrency: won ? "USD" : null,
+    });
+    insightIdentities.push(id);
+    insightTps.push(fixtureTouchpoint({ identityId: id.id, channel: "ad_click", source: "referral", campaign: "c2", occurredAt: daysAgo(20) }));
+  }
+  // Attribution-quality trend: last week (real tracked touches, 0% missing) vs this week (3 of 5 are CRM-only, 60% missing) — a 60-point jump should trigger rule 4
+  for (let i = 0; i < 5; i++) {
+    const id = fixtureIdentity({ id: `lwId${i}`, email: `lw${i}@example.com` });
+    insightIdentities.push(id);
+    insightTps.push(fixtureTouchpoint({ identityId: id.id, channel: "website_visit", source: "website", referrer: "https://google.com", occurredAt: daysAgo(10) }));
+  }
+  for (let i = 0; i < 5; i++) {
+    const missing = i < 3;
+    const id = fixtureIdentity({ id: `twId${i}`, email: `tw${i}@example.com` });
+    insightIdentities.push(id);
+    insightTps.push(
+      missing
+        ? fixtureTouchpoint({ identityId: id.id, channel: "pipedrive_lead_created", source: "pipedrive", occurredAt: daysAgo(2) })
+        : fixtureTouchpoint({ identityId: id.id, channel: "website_visit", source: "website", referrer: "https://google.com", occurredAt: daysAgo(2) })
+    );
+  }
+  const insightSummary = buildPortalSummary(insightIdentities, insightTps);
+  assert(
+    insightSummary.notableChanges.some((c) => c.text.includes("referral is your strongest revenue source") && c.text.includes("100%")),
+    "computeNotableChanges (rule 2): 'referral' correctly flagged as strongest revenue source — 100% of Won revenue, from a meaningful (5-prospect) sample, not a tiny one"
+  );
+  assert(
+    insightSummary.notableChanges.some((c) => c.text.includes("meta is generating prospects but few deals") && c.text.includes("6 prospects")),
+    "computeNotableChanges (rule 3): 'meta' correctly flagged — 6 prospects, 0 deals, well below the 10% conversion threshold"
+  );
+  assert(
+    insightSummary.notableChanges.some((c) => c.text.startsWith("Attribution quality has dropped") && c.text.includes("60%") && c.text.includes("0%")),
+    "computeNotableChanges (rule 4): a 60-point week-over-week jump in missing-attribution rate among newly-seen contacts is correctly flagged"
+  );
+
   // --- dealStageBySource ("where do leads get stuck?") -------------------
   const openDealIdentity = fixtureIdentity({
     id: "idA",
@@ -493,8 +546,8 @@ async function main() {
 
   const byTotalFunnel = filterProspects([idAConverted, idB, idC], tps, { type: "funnel", value: "total" });
   assert(
-    byTotalFunnel.length === 2,
-    "filterProspects: funnel filter 'total' still excludes identities with zero touchpoints (idC) — there's no journey to show for them, same exclusion rule buildPortalSummary's own recent list already applies"
+    byTotalFunnel.length === 3 && byTotalFunnel.some((r) => r.identityId === "idC" && r.firstTouchChannel === "No tracked touch"),
+    "filterProspects: funnel filter 'total' now correctly INCLUDES idC (zero touchpoints) too, shown with a clear 'No tracked touch' fallback rather than crashing or being silently dropped — toRecentProspect is null-safe now, so the drill-down's row count matches what matchingIdentities actually decided to include"
   );
 
   const identitiesBySource = filterIdentities([idAConverted, idB, idC], tps, { type: "source", value: "linkedin_ads" });
@@ -505,12 +558,15 @@ async function main() {
 
   // --- paginateProspects (Recently active prospects' real pagination) ---
   const page1 = paginateProspects([idAConverted, idB, idC], tps, { includeAnonymous: true, page: 1, pageSize: 1 });
-  assert(page1.total === 2 && page1.prospects.length === 1, "paginateProspects: total reflects every matching prospect (2), even though pageSize only returns 1 of them");
+  assert(
+    page1.total === 3 && page1.prospects.length === 1,
+    "paginateProspects: total reflects every matching prospect (3) — idC (zero touchpoints) is now correctly included too, not silently dropped — even though pageSize only returns 1 of them"
+  );
   assert(page1.prospects[0].identityId === "idB", "paginateProspects: page 1 returns the most-recently-seen match first (idB, lastSeenAt 01-12), same sort order as the old capped `recent` list");
   const page2 = paginateProspects([idAConverted, idB, idC], tps, { includeAnonymous: true, page: 2, pageSize: 1 });
   assert(page2.prospects.length === 1 && page2.prospects[0].identityId === "idA", "paginateProspects: page 2 returns the next match (idA), not a repeat of page 1");
   const pastLastPage = paginateProspects([idAConverted, idB, idC], tps, { includeAnonymous: true, page: 5, pageSize: 1 });
-  assert(pastLastPage.prospects.length === 0 && pastLastPage.total === 2, "paginateProspects: requesting a page past the end returns an empty page, not an error, while total stays accurate");
+  assert(pastLastPage.prospects.length === 0 && pastLastPage.total === 3, "paginateProspects: requesting a page past the end returns an empty page, not an error, while total stays accurate");
 
   // --- UTM filter (segments every report, not just the drill-down) ------
   const utmFilteredSummary = buildPortalSummary([idAConverted, idB, idC], tps, { source: "linkedin_ads" });
@@ -580,6 +636,130 @@ async function main() {
   assert(
     channelFilteredBySource.length === 1 && channelFilteredBySource[0].identityId === "idA",
     "filterProspects: channel composes with the other UTM fields (source here) — both must match, not either/or"
+  );
+
+  // --- Acquisition fields & attribution status (RecentProspect) ---------
+  const acqCrmOnlyTps = [
+    fixtureTouchpoint({ identityId: "idA", channel: "pipedrive_lead_created", source: "pipedrive", occurredAt: new Date("2026-04-01") }),
+    fixtureTouchpoint({ identityId: "idA", channel: "pipedrive_activity", source: "whatsapp_chat", occurredAt: new Date("2026-04-02") }),
+  ];
+  const acqCrmOnlyIdentity = fixtureIdentity({ id: "idA", email: "a@example.com" });
+  const acqMissingSummary = buildPortalSummary([acqCrmOnlyIdentity], acqCrmOnlyTps);
+  const acqMissingRow = acqMissingSummary.recent.find((r) => r.identityId === "idA");
+  assert(
+    acqMissingRow?.attributionStatus === "missing" && acqMissingRow?.acquisitionChannel === null,
+    "toRecentProspect: an identity with ONLY CRM-event touchpoints (Lead created, a WhatsApp Activity) gets attributionStatus 'missing' and a null acquisitionChannel — even though firstTouchChannel (the OLD, still-used-elsewhere field) would show 'Lead created'"
+  );
+  assert(
+    acqMissingRow?.firstTouchChannel === "Lead created",
+    "toRecentProspect: firstTouchChannel is UNCHANGED (still whatever happened first, CRM events included) — acquisitionChannel is a deliberately separate, additive concept, not a replacement"
+  );
+
+  const acqMixedTps = [
+    fixtureTouchpoint({ identityId: "idB", channel: "pipedrive_lead_created", source: "pipedrive", occurredAt: new Date("2026-04-01") }),
+    fixtureTouchpoint({
+      identityId: "idB",
+      channel: "ad_click",
+      source: "google",
+      campaign: "spring_sale",
+      gclid: "abc123",
+      occurredAt: new Date("2026-04-02"),
+    }),
+  ];
+  const acqMixedIdentity = fixtureIdentity({ id: "idB", email: "b@example.com" });
+  const acqMixedSummary = buildPortalSummary([acqMixedIdentity], acqMixedTps);
+  const acqMixedRow = acqMixedSummary.recent.find((r) => r.identityId === "idB");
+  assert(
+    acqMixedRow?.acquisitionChannel === "Ad click" && acqMixedRow?.attributionStatus === "attributed",
+    "toRecentProspect: acquisitionChannel correctly skips PAST the chronologically-first CRM event (Lead created) to find the first REAL marketing touch (Ad click, with a campaign+gclid) — 'attributed' since it carries real campaign/click-id data"
+  );
+
+  const acqFallbackTps = [
+    fixtureTouchpoint({
+      identityId: "idC",
+      channel: "lead_source_field",
+      source: "https://www.instagram.com/p/DcJOBtlgfqT",
+      campaign: null,
+      occurredAt: new Date("2026-04-01"),
+    }),
+  ];
+  const acqFallbackIdentity = fixtureIdentity({ id: "idC", email: "c@example.com" });
+  const acqFallbackSummary = buildPortalSummary([acqFallbackIdentity], acqFallbackTps);
+  const acqFallbackRow = acqFallbackSummary.recent.find((r) => r.identityId === "idC");
+  assert(
+    acqFallbackRow?.attributionStatus === "partial",
+    "toRecentProspect: a lead_source_field touchpoint is ALWAYS 'partial', never 'attributed' — it's a best-effort fallback guess, not real tracking, even without a campaign check"
+  );
+  assert(
+    acqFallbackRow?.acquisitionSource === "Instagram" && acqFallbackRow?.acquisitionSourceRaw === "https://www.instagram.com/p/DcJOBtlgfqT",
+    "toRecentProspect: acquisitionSource normalizes a recognized platform URL to a clean name for display, while acquisitionSourceRaw keeps the original URL intact"
+  );
+
+  const acqDirectTps = [fixtureTouchpoint({ identityId: "idA", channel: "website_visit", source: "website", referrer: null, occurredAt: new Date("2026-04-01") })];
+  const acqDirectIdentity = fixtureIdentity({ id: "idA", email: "a2@example.com" });
+  const acqDirectSummary = buildPortalSummary([acqDirectIdentity], acqDirectTps);
+  assert(
+    acqDirectSummary.recent[0]?.attributionStatus === "direct",
+    "toRecentProspect: a plain website_visit with no referrer at all is genuine direct traffic ('direct'), not a tracking gap ('partial')"
+  );
+
+  const acqStatusIdentity = fixtureIdentity({ id: "idA", email: "a3@example.com", dealCreatedDealId: 999 });
+  const acqStatusSummary = buildPortalSummary(
+    [acqStatusIdentity],
+    [fixtureTouchpoint({ identityId: "idA", channel: "website_visit", occurredAt: new Date() })]
+  );
+  assert(acqStatusSummary.recent[0]?.status === "deal", "toRecentProspect: status collapses the existing lead/deal/won milestones into one glance-able value — has a Deal but no wonDealId, so 'deal' not 'lead' or 'won'");
+
+  // --- Top-level commercial metrics (attributedLeadsCount, pipelineValue, wonRevenue, attributionCoverage) ---
+  const topAttributedLead = fixtureIdentity({ id: "idA", email: "a@example.com", leadCreatedAt: new Date("2026-05-01"), dealCreatedDealId: 800, dealValueAtCreate: 5000, dealCurrencyAtCreate: "USD" });
+  const topAttributedLeadTp = fixtureTouchpoint({ identityId: "idA", channel: "ad_click", source: "google", campaign: "spring", occurredAt: new Date("2026-05-01") });
+  const topPartialLead = fixtureIdentity({ id: "idB", email: "b@example.com", leadCreatedAt: new Date("2026-05-02") });
+  const topPartialLeadTp = fixtureTouchpoint({ identityId: "idB", channel: "social_organic", source: "instagram", occurredAt: new Date("2026-05-02") });
+  const topWonIdentity = fixtureIdentity({ id: "idC", email: "c@example.com", wonDealId: 801, dealValue: 20000, dealCurrency: "USD" });
+  const topWonTp = fixtureTouchpoint({ identityId: "idC", channel: "ad_click", source: "google", campaign: "spring", occurredAt: new Date("2026-05-03") });
+  const topSummary = buildPortalSummary([topAttributedLead, topPartialLead, topWonIdentity], [topAttributedLeadTp, topPartialLeadTp, topWonTp]);
+  assert(topSummary.attributedLeadsCount === 1, "attributedLeadsCount: only idA counts — a real Lead (leadCreatedAt set) AND attributionStatus 'attributed'. idB is a Lead but only 'partial' (organic, no campaign), so it's correctly excluded");
+  assert(topSummary.pipelineValue.USD === 5000, "pipelineValue: idA's OPEN deal (dealCreatedDealId set, not yet won) contributes its dealValueAtCreate — idC's WON deal correctly does NOT show up here even though it also has a captured value");
+  assert(topSummary.wonRevenue.USD === 20000, "wonRevenue: idC's actual closed dealValue, matching the existing funnelValue 'Won' figure");
+  assert(
+    topSummary.attributionCoverage.covered === 3 && topSummary.attributionCoverage.total === 3,
+    "attributionCoverage: ALL 3 identities count as 'covered' — idA and idC are strictly 'attributed', and idB (partial, from organic social) STILL counts here too, since coverage means 'we know something meaningful,' not strictly 'a full UTM campaign' — that stricter distinction lives in attributionBreakdown instead"
+  );
+  assert(topSummary.attributionIssuesCount === 1, "attributionIssuesCount: only idB (partial) counts — 'attributed' identities are obviously not issues, and there are no 'missing' identities in this scenario");
+
+  // --- attributionIssue drill-down filter (the "N tracking issues" popup) ---
+  const zeroTouchpointIdentity = fixtureIdentity({ id: "idD", email: "d@example.com" }); // no touchpoints at all — exactly what "missing" attribution means
+  const issueFiltered = filterProspects([topAttributedLead, topPartialLead, topWonIdentity, zeroTouchpointIdentity], [topAttributedLeadTp, topPartialLeadTp, topWonTp], {
+    type: "attributionIssue",
+    value: "true",
+  });
+  assert(
+    issueFiltered.length === 2 && issueFiltered.some((r) => r.identityId === "idB") && issueFiltered.some((r) => r.identityId === "idD"),
+    "attributionIssue filter: correctly includes idD (ZERO touchpoints, no summary at all) alongside idB (partial) — a zero-touchpoint identity is exactly what 'missing' means and must not be silently excluded by the general 'no summary, skip' guard other filter types rely on"
+  );
+
+  // --- attributionStatus filter (individual bucket drill-down, Attribution Health) ---
+  const missingOnlyFiltered = filterProspects([topAttributedLead, topPartialLead, topWonIdentity, zeroTouchpointIdentity], [topAttributedLeadTp, topPartialLeadTp, topWonTp], {
+    type: "attributionStatus",
+    value: "missing",
+  });
+  assert(
+    missingOnlyFiltered.length === 1 && missingOnlyFiltered[0].identityId === "idD",
+    "attributionStatus filter (value='missing'): a STRICT single-status match — only idD, NOT idB (which is 'partial', a different bucket entirely, unlike the combined attributionIssue filter above)"
+  );
+
+  // --- attributionBreakdown (Attribution Health section) --------------------
+  assert(
+    topSummary.attributionBreakdown.attributed === 2 &&
+      topSummary.attributionBreakdown.partial === 1 &&
+      topSummary.attributionBreakdown.direct === 0 &&
+      topSummary.attributionBreakdown.missing === 0 &&
+      topSummary.attributionBreakdown.total === 3,
+    "attributionBreakdown: all 4 buckets counted individually across the same 3-identity scenario used for attributionCoverage above (2 attributed, 1 partial, 0 direct, 0 missing)"
+  );
+  assert(
+    topSummary.attributionBreakdown.score === 83,
+    "attributionBreakdown.score: weighted average — (2 attributed × 1.0 + 1 partial × 0.5) / 3 × 100 = 83, not a simple attributed/total percentage (which would be 67)"
   );
 
   // --- CSV export (uncapped — unlike buildPortalSummary's top 25/10) ---

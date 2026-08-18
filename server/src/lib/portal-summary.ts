@@ -1,5 +1,5 @@
 import { Identity, Touchpoint, isIdentified } from "../db";
-import { buildAttributionSummary, CHANNEL_LABELS } from "./attribution";
+import { buildAttributionSummary, CHANNEL_LABELS, isMarketingChannel, normalizeSourceForDisplay } from "./attribution";
 
 /**
  * Aggregates across every identity for a tenant — the thing the Pipedrive
@@ -285,7 +285,7 @@ export interface RecentProspect {
   // particular ad/post caused this" without expanding the row — see
   // dashboard.html's firstTouchDetail(). Deliberately first-touch only,
   // same reasoning as firstTouchReferrer above.
-  firstTouchSource: string;
+  firstTouchSource: string | null;
   firstTouchMedium: string | null;
   firstTouchCampaign: string | null;
   firstTouchTerm: string | null;
@@ -320,6 +320,43 @@ export interface RecentProspect {
   // field, or this identity's Lead/Deal never had it set.
   segmentValue: string | null;
   segmentLabel: string | null;
+  // "Acquisition" fields — deliberately DIFFERENT from firstTouchChannel/
+  // firstTouchSource above, which describe the chronologically first
+  // touchpoint of ANY kind, CRM events included (so an identity whose
+  // very first webhook was "Lead created" shows THAT as firstTouchChannel
+  // — correct for the existing conversion-by-source/segment reports,
+  // which all key off it consistently, but actively misleading for a
+  // person reading the Recently active prospects table, who reasonably
+  // expects "first touch" to mean "where did this person come from,"
+  // not "what CRM event happened first"). These four instead describe
+  // the first MARKETING touch specifically — see attribution.ts's
+  // isMarketingChannel — and are null when NONE exists (an identity
+  // with only CRM-event touchpoints, e.g. a lead worked entirely inside
+  // Pipedrive with no tracked activity at all).
+  acquisitionChannel: string | null;
+  // Normalized for display (attribution.ts's normalizeSourceForDisplay
+  // — e.g. a bare Instagram post URL becomes "Instagram"); acquisitionSourceRaw
+  // keeps the original value for anyone who wants the literal URL/text.
+  acquisitionSource: string | null;
+  acquisitionSourceRaw: string | null;
+  acquisitionCampaign: string | null;
+  acquisitionLandingPage: string | null;
+  // Single, collapsed "how far did this get commercially" status — the
+  // same underlying milestones already on this interface
+  // (leadToDealTouchpoints/dealToWonTouchpoints implying lead/deal
+  // existence, dealValue implying Won), just combined into one glance-able
+  // value rather than requiring several fields to be cross-referenced.
+  status: "tracked" | "lead" | "deal" | "won";
+  // See attribution.ts's isMarketingChannel doc comment and this
+  // session's agreed classification: "attributed" (a real UTM campaign
+  // or ad click ID), "partial" (a recognized marketing channel but no
+  // structured campaign data — including anything from the lead-source
+  // fallback, since that's inherently a best-effort guess rather than
+  // real tracking), "direct" (a plain website visit with no referrer or
+  // UTM at all — genuine direct traffic, not a tracking gap), "missing"
+  // (no marketing touchpoint exists at all — our tracking never saw
+  // this person).
+  attributionStatus: AttributionStatus;
 }
 
 export interface PortalSummary {
@@ -378,6 +415,55 @@ export interface PortalSummary {
     uShaped: MultiTouchAttributionRow[];
   };
   notableChanges: NotableChange[];
+  // Commercial top-of-page metrics — deliberately separate from the
+  // existing funnel array (which already has dealCreatedCount/wonCount
+  // equivalents buried in it) since these are meant to be the FIRST
+  // thing shown, not something requiring a scan through funnel stages
+  // to find. attributedLeadsCount specifically means "became a Lead AND
+  // has real structured attribution" — the intersection of two
+  // different existing concepts (identity.leadCreatedAt and
+  // AttributionStatus 'attributed'), not just a rename of an existing
+  // count.
+  attributedLeadsCount: number;
+  dealsCreatedCount: number;
+  wonDealsCount: number;
+  pipelineValue: RevenueByCurrency;
+  wonRevenue: RevenueByCurrency;
+  // "covered" = attributed + partial — "we know SOMETHING meaningful
+  // about where this contact came from," not strictly "a fully
+  // structured UTM campaign or click ID." Deliberately more generous
+  // than the strict "attributed" bucket alone (see AttributionStatus's
+  // own reasoning) — this is the headline number a client sees first,
+  // and a business whose real lead flow comes mostly through something
+  // like a WhatsApp fallback (always classified "partial," never
+  // "attributed," since it's a best-effort guess rather than something
+  // directly tracked) would otherwise see a needlessly harsh, misleading
+  // "4% attributed" even though tracking is genuinely working. The
+  // stricter attributed-only distinction is still fully preserved and
+  // visible in attributionBreakdown below, for anyone drilling in who
+  // already expects that nuance. "direct" and "missing" are both
+  // deliberately excluded from "covered" — direct traffic has no
+  // source to report at all (that's what direct means), and missing is
+  // the genuine gap. total respects the active UTM filter, same
+  // convention as totalIdentities elsewhere on this interface.
+  attributionCoverage: { covered: number; total: number; rate: number };
+  // "missing" + "partial" only — direct traffic isn't an issue, it's
+  // genuinely just direct, so it's excluded from this count on purpose.
+  attributionIssuesCount: number;
+  // The full 4-bucket breakdown, plus a single weighted score out of
+  // 100 — see attributionScore's own inline comment for exactly how
+  // it's weighted. Distinct from attributionCoverage above (which only
+  // exposes the "attributed" bucket, since that's a narrower, stricter
+  // number worth its own top-level card) — this is the fuller picture,
+  // for the dedicated Attribution Health section.
+  attributionBreakdown: {
+    attributed: number;
+    partial: number;
+    direct: number;
+    missing: number;
+    total: number;
+    score: number;
+  };
   distinctUtmValues: DistinctUtmValues;
 }
 
@@ -571,28 +657,42 @@ function computeMultiTouchAttribution(
 
 const NOTABLE_CHANGE_THRESHOLD = 0.3; // 30%+ change to be worth surfacing
 const NOTABLE_CHANGE_MIN_BASELINE = 3; // last week's count must be at least this — otherwise a jump from 1→3 touchpoints reads as a dramatic "200% increase" that's really just noise
+const INSIGHT_MIN_BASELINE = 5; // don't flag a revenue-concentration or low-conversion insight based on a handful of prospects
+const LOW_CONVERSION_RATE_THRESHOLD = 0.1; // below 10% deal conversion, worth flagging IF volume is meaningful
+const STRONG_REVENUE_SHARE_THRESHOLD = 0.25; // a source generating a quarter or more of Won revenue is worth calling out by name
 
 /**
- * Compares this week's touchpoint volume against last week's, per
- * source, and surfaces anything that moved by more than 30% — e.g.
- * "facebook touchpoint volume dropped 40% this week (12 → 7)". Scoped
- * to SOURCE specifically (not channel or campaign) since that's the
- * dimension a person is most likely to act on ("did we cut Facebook
- * budget" is actionable in a way "did website_visit channel drop" —
- * mixing every source together — usually isn't).
+ * The "What needs attention?" insights — four independent, entirely
+ * deterministic rules (no AI/ML involved), merged into one sorted list:
  *
- * Requires at least NOTABLE_CHANGE_MIN_BASELINE touchpoints in the
- * PRIOR week specifically — without this, a source going from 1
- * touchpoint to 3 would read as a dramatic "200% increase" that's
- * really just noise from a tiny sample. A brand-new source with zero
- * prior-week history never gets flagged either, for the same reason
- * (nothing to meaningfully compare against yet).
+ *  1. Week-over-week touchpoint VOLUME by source (the original,
+ *     unchanged — see its own reasoning below).
+ *  2. Strongest REVENUE source — which source generated the largest
+ *     share of Won revenue, only surfaced when that share is genuinely
+ *     large (25%+), so this doesn't fire on a near-even split where
+ *     naming a "winner" would be misleading.
+ *  3. Volume without deals — a source producing a meaningful number of
+ *     prospects but converting almost none of them to a Deal. Doesn't
+ *     necessarily mean the channel is bad (see the avg-days-to-convert
+ *     reporting elsewhere for the "give it time" counter-argument) —
+ *     just genuinely worth a look.
+ *  4. Attribution quality trend — compares the MISSING-attribution rate
+ *     among newly-first-seen contacts this week vs last week, so a
+ *     tracking regression (a broken snippet, a paused UTM habit) shows
+ *     up as its own alert rather than silently degrading every other
+ *     report's accuracy unnoticed.
+ *
+ * Rules 2-4 all require INSIGHT_MIN_BASELINE prospects before firing,
+ * same "don't trust a tiny sample" principle as rule 1's own
+ * NOTABLE_CHANGE_MIN_BASELINE.
  */
-function computeNotableChanges(touchpoints: Touchpoint[]): NotableChange[] {
+function computeNotableChanges(identities: Identity[], touchpoints: Touchpoint[]): NotableChange[] {
   const now = new Date();
   const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+  const withMagnitude: { text: string; direction: "increase" | "decrease"; magnitude: number }[] = [];
 
+  // --- Rule 1: week-over-week touchpoint volume by source ---
   const thisWeekBySource = new Map<string, number>();
   const lastWeekBySource = new Map<string, number>();
   for (const tp of touchpoints) {
@@ -603,8 +703,6 @@ function computeNotableChanges(touchpoints: Touchpoint[]): NotableChange[] {
       lastWeekBySource.set(tp.source, (lastWeekBySource.get(tp.source) ?? 0) + 1);
     }
   }
-
-  const withMagnitude: { text: string; direction: "increase" | "decrease"; magnitude: number }[] = [];
   const allSources = new Set([...thisWeekBySource.keys(), ...lastWeekBySource.keys()]);
   for (const source of allSources) {
     const thisWeek = thisWeekBySource.get(source) ?? 0;
@@ -620,6 +718,123 @@ function computeNotableChanges(touchpoints: Touchpoint[]): NotableChange[] {
       magnitude: Math.abs(change),
     });
   }
+
+  // Shared setup for rules 2-4: per-identity touchpoints and a
+  // per-source rollup of volume/conversion/won-revenue.
+  const byIdentity = new Map<string, Touchpoint[]>();
+  for (const tp of touchpoints) {
+    if (!tp.identityId) continue;
+    const list = byIdentity.get(tp.identityId) ?? [];
+    list.push(tp);
+    byIdentity.set(tp.identityId, list);
+  }
+  const bySource = new Map<string, { total: number; converted: number; wonRevenue: Map<string, number> }>();
+  for (const identity of identities) {
+    const tps = (byIdentity.get(identity.id) ?? []).slice().sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
+    const summary = buildAttributionSummary(tps);
+    if (!summary) continue;
+    const bucket = bySource.get(summary.firstTouchSource) ?? { total: 0, converted: 0, wonRevenue: new Map<string, number>() };
+    bucket.total++;
+    if (identity.dealCreatedDealId !== null) bucket.converted++;
+    if (identity.wonDealId !== null && identity.dealValue !== null && identity.dealCurrency) {
+      bucket.wonRevenue.set(identity.dealCurrency, (bucket.wonRevenue.get(identity.dealCurrency) ?? 0) + identity.dealValue);
+    }
+    bySource.set(summary.firstTouchSource, bucket);
+  }
+
+  // --- Rule 2: strongest revenue source ---
+  // Only considers ONE currency (whichever contributed the most Won
+  // revenue overall) — mixing currencies into one "share" figure would
+  // be meaningless, and a tenant with genuinely mixed-currency revenue
+  // is a rare enough case that skipping this insight for them entirely
+  // is preferable to a misleading blended number.
+  const totalByCurrency = new Map<string, number>();
+  for (const b of bySource.values()) {
+    for (const [c, v] of b.wonRevenue) totalByCurrency.set(c, (totalByCurrency.get(c) ?? 0) + v);
+  }
+  let dominantCurrency: string | null = null;
+  let dominantTotal = 0;
+  for (const [c, v] of totalByCurrency) {
+    if (v > dominantTotal) {
+      dominantCurrency = c;
+      dominantTotal = v;
+    }
+  }
+  if (dominantCurrency && dominantTotal > 0) {
+    let topSource: string | null = null;
+    let topRevenue = 0;
+    let topSourceTotal = 0;
+    for (const [source, b] of bySource) {
+      const rev = b.wonRevenue.get(dominantCurrency) ?? 0;
+      if (rev > topRevenue) {
+        topSource = source;
+        topRevenue = rev;
+        topSourceTotal = b.total;
+      }
+    }
+    if (topSource) {
+      const revenueShare = topRevenue / dominantTotal;
+      if (revenueShare >= STRONG_REVENUE_SHARE_THRESHOLD) {
+        const totalProspects = Array.from(bySource.values()).reduce((sum, b) => sum + b.total, 0);
+        const prospectShare = totalProspects > 0 ? Math.round((topSourceTotal / totalProspects) * 100) : 0;
+        withMagnitude.push({
+          text: `${topSource} is your strongest revenue source — generated ${Math.round(revenueShare * 100)}% of Won revenue from ${prospectShare}% of tracked prospects.`,
+          direction: "increase",
+          magnitude: revenueShare,
+        });
+      }
+    }
+  }
+
+  // --- Rule 3: volume without deals ---
+  for (const [source, b] of bySource) {
+    if (b.total < INSIGHT_MIN_BASELINE) continue;
+    const rate = b.converted / b.total;
+    if (rate < LOW_CONVERSION_RATE_THRESHOLD) {
+      withMagnitude.push({
+        text: `${source} is generating prospects but few deals — ${b.total} prospects → ${b.converted} deal${b.converted === 1 ? "" : "s"} so far.`,
+        direction: "decrease",
+        magnitude: 1 - rate,
+      });
+    }
+  }
+
+  // --- Rule 4: attribution quality trend ---
+  // "First seen" here means this identity's OWN first touchpoint,
+  // regardless of channel (deliberately not restricted to marketing
+  // touches like acquisitionChannel elsewhere) — the question this rule
+  // answers is "when did tracking first pick this person up," and a
+  // CRM-only identity (no marketing touch ever recorded) picked up this
+  // week is exactly the kind of gap this rule exists to catch.
+  let thisWeekTotal = 0;
+  let thisWeekMissing = 0;
+  let lastWeekTotal = 0;
+  let lastWeekMissing = 0;
+  for (const identity of identities) {
+    const tps = (byIdentity.get(identity.id) ?? []).slice().sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
+    if (!tps.length) continue;
+    const firstSeen = tps[0].occurredAt;
+    const { status } = classifyAttribution(tps);
+    if (firstSeen >= oneWeekAgo && firstSeen <= now) {
+      thisWeekTotal++;
+      if (status === "missing") thisWeekMissing++;
+    } else if (firstSeen >= twoWeeksAgo && firstSeen < oneWeekAgo) {
+      lastWeekTotal++;
+      if (status === "missing") lastWeekMissing++;
+    }
+  }
+  if (thisWeekTotal >= INSIGHT_MIN_BASELINE && lastWeekTotal >= INSIGHT_MIN_BASELINE) {
+    const thisWeekRate = thisWeekMissing / thisWeekTotal;
+    const lastWeekRate = lastWeekMissing / lastWeekTotal;
+    if (thisWeekRate - lastWeekRate >= 0.15) {
+      withMagnitude.push({
+        text: `Attribution quality has dropped — ${Math.round(thisWeekRate * 100)}% of new contacts this week arrived without source information, up from ${Math.round(lastWeekRate * 100)}% last week.`,
+        direction: "decrease",
+        magnitude: thisWeekRate - lastWeekRate,
+      });
+    }
+  }
+
   return withMagnitude.sort((a, b) => b.magnitude - a.magnitude).map(({ text, direction }) => ({ text, direction }));
 }
 
@@ -645,28 +860,74 @@ function mondayOfWeek(d: Date): Date {
   return monday;
 }
 
+export type AttributionStatus = "attributed" | "partial" | "direct" | "missing";
+
+// Extracted so both toRecentProspect (per-row, for the table) AND
+// buildPortalSummary's top-level attribution coverage stat (across
+// EVERY identity, not just the 25 shown in the table) use the exact
+// same classification, rather than two copies drifting apart over
+// time. See RecentProspect.attributionStatus's own doc comment for the
+// full reasoning behind each bucket.
+function classifyAttribution(touchpoints: Touchpoint[]): { firstMarketingTouch: Touchpoint | null; status: AttributionStatus } {
+  const marketingTouches = touchpoints
+    .filter((tp) => isMarketingChannel(tp.channel))
+    .slice()
+    .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
+  const firstMarketingTouch = marketingTouches[0] ?? null;
+
+  let status: AttributionStatus;
+  if (!firstMarketingTouch) {
+    status = "missing";
+  } else if (firstMarketingTouch.channel === "lead_source_field") {
+    // A best-effort fallback guess, not real tracking — never
+    // "attributed" even if it happens to carry campaign-shaped text.
+    status = "partial";
+  } else if (firstMarketingTouch.campaign || firstMarketingTouch.gclid || firstMarketingTouch.fbclid || firstMarketingTouch.msclkid) {
+    status = "attributed";
+  } else if (firstMarketingTouch.channel === "website_visit" && !firstMarketingTouch.referrer) {
+    status = "direct"; // genuine direct traffic (typed URL, bookmark) — not a tracking gap
+  } else {
+    status = "partial"; // a recognized channel (organic social, website with a referrer, email) but no structured campaign/click-id data
+  }
+  return { firstMarketingTouch, status };
+}
+
 function toRecentProspect(
   identity: Identity,
   summary: ReturnType<typeof buildAttributionSummary>,
+  touchpoints: Touchpoint[],
   segmentOptions?: { id: string; name: string }[]
 ): RecentProspect {
+  const { firstMarketingTouch, status: attributionStatus } = classifyAttribution(touchpoints);
+
+  // A genuinely zero-touchpoint identity — exactly what "missing"
+  // attribution status means — has no summary to draw from at all.
+  // Every summary-derived field below falls back to a clear, honest
+  // "nothing tracked" value rather than crashing (this function used to
+  // assume a summary always existed via non-null assertions, which is
+  // why filterProspects had its own blanket "drop anything with a null
+  // summary" step — that step incorrectly ALSO dropped these
+  // legitimately-missing identities from the attributionIssue
+  // drill-down, which specifically needs to show them).
+  const NO_TOUCH = "No tracked touch";
+
   return {
     identityId: identity.id,
     email: identity.email,
     name: identity.name,
     phone: identity.phone,
-    firstTouchChannel: summary!.firstTouchChannel,
-    lastTouchChannel: summary!.lastTouchChannel,
-    touchpointCount: summary!.touchpointCount,
+    firstTouchChannel: summary?.firstTouchChannel ?? NO_TOUCH,
+    lastTouchChannel: summary?.lastTouchChannel ?? NO_TOUCH,
+    touchpointCount: summary?.touchpointCount ?? 0,
     lastSeenAt: identity.lastSeenAt.toISOString(),
-    firstTouchReferrer: summary!.firstTouchReferrer,
-    firstTouchSource: summary!.firstTouchSource,
-    firstTouchMedium: summary!.firstTouchMedium,
-    firstTouchCampaign: summary!.firstTouchCampaign,
-    firstTouchTerm: summary!.firstTouchTerm,
-    firstTouchContent: summary!.firstTouchContent,
-    firstTouchGclid: summary!.firstTouchGclid,
-    firstTouchFbclid: summary!.firstTouchFbclid,
+    firstTouchReferrer: summary?.firstTouchReferrer ?? null,
+    firstTouchSource: summary?.firstTouchSource ?? null,
+    firstTouchMedium: summary?.firstTouchMedium ?? null,
+    firstTouchCampaign: summary?.firstTouchCampaign ?? null,
+    firstTouchTerm: summary?.firstTouchTerm ?? null,
+    firstTouchContent: summary?.firstTouchContent ?? null,
+    firstTouchGclid: summary?.firstTouchGclid ?? null,
+    firstTouchFbclid: summary?.firstTouchFbclid ?? null,
     dealValue: identity.dealValue,
     dealCurrency: identity.dealCurrency,
     leadToDealTouchpoints: identity.leadToDealTouchpoints,
@@ -681,6 +942,13 @@ function toRecentProspect(
           .map((v) => resolveSegmentName(v, segmentOptions))
           .join(", ")
       : null,
+    acquisitionChannel: firstMarketingTouch ? CHANNEL_LABELS[firstMarketingTouch.channel] || firstMarketingTouch.channel : null,
+    acquisitionSource: firstMarketingTouch ? normalizeSourceForDisplay(firstMarketingTouch.source) : null,
+    acquisitionSourceRaw: firstMarketingTouch?.source ?? null,
+    acquisitionCampaign: firstMarketingTouch?.campaign ?? null,
+    acquisitionLandingPage: firstMarketingTouch?.url ?? null,
+    status: identity.wonDealId !== null ? "won" : identity.dealCreatedDealId !== null ? "deal" : identity.leadCreatedAt ? "lead" : "tracked",
+    attributionStatus,
   };
 }
 
@@ -689,7 +957,16 @@ export type ProspectFilter =
   | { type: "source"; value: string }
   | { type: "campaign"; value: string }
   | { type: "segment"; value: string }
-  | { type: "assistedChannel"; value: string };
+  | { type: "assistedChannel"; value: string }
+  // For the "Attribution Coverage"/"N tracking issues" top-level card —
+  // matches "missing" or "partial" specifically (see
+  // attributionIssuesCount's own doc comment for why "direct" is
+  // deliberately excluded from counting as an issue).
+  | { type: "attributionIssue"; value: "true" }
+  // For the Attribution Health section's individual bucket drill-downs
+  // (e.g. clicking "12 Direct" specifically) — a strict SINGLE-status
+  // match, unlike attributionIssue above which combines two.
+  | { type: "attributionStatus"; value: AttributionStatus };
 
 // The actual matching logic, shared by filterProspects (JSON, for the
 // dashboard's popup) and filterIdentities (raw Identity rows, for the
@@ -703,7 +980,7 @@ function matchingIdentities(
   touchpoints: Touchpoint[],
   filter: ProspectFilter,
   utmFilter?: UtmFilter
-): Array<{ identity: Identity; summary: NonNullable<ReturnType<typeof buildAttributionSummary>> | null }> {
+): Array<{ identity: Identity; summary: NonNullable<ReturnType<typeof buildAttributionSummary>> | null; tps: Touchpoint[] }> {
   const byIdentity = new Map<string, Touchpoint[]>();
   for (const tp of touchpoints) {
     if (!tp.identityId) continue;
@@ -712,7 +989,7 @@ function matchingIdentities(
     byIdentity.set(tp.identityId, list);
   }
 
-  const results: Array<{ identity: Identity; summary: NonNullable<ReturnType<typeof buildAttributionSummary>> | null }> = [];
+  const results: Array<{ identity: Identity; summary: NonNullable<ReturnType<typeof buildAttributionSummary>> | null; tps: Touchpoint[] }> = [];
   for (const identity of identities) {
     if (filter.type === "funnel") {
       if (filter.value === "identified" && !identity.email) continue;
@@ -733,7 +1010,22 @@ function matchingIdentities(
     // (An active utmFilter already excluded no-summary identities above,
     // via matchesUtmFilter's own `if (!summary) return false`.)
     if (filter.type === "funnel" && filter.value === "total") {
-      results.push({ identity, summary });
+      results.push({ identity, summary, tps });
+      continue;
+    }
+    // Same reasoning as "total" above — a zero-touchpoint identity is
+    // EXACTLY what "missing" attribution means (classifyAttribution
+    // handles an empty array gracefully, returning "missing"), so this
+    // needs to run before the summary-required guard below, not be
+    // excluded by it.
+    if (filter.type === "attributionIssue") {
+      const { status } = classifyAttribution(tps);
+      if (status === "missing" || status === "partial") results.push({ identity, summary, tps });
+      continue;
+    }
+    if (filter.type === "attributionStatus") {
+      const { status } = classifyAttribution(tps);
+      if (status === filter.value) results.push({ identity, summary, tps });
       continue;
     }
     if (!summary) continue;
@@ -754,7 +1046,7 @@ function matchingIdentities(
       if (!hasChannel) continue;
     }
 
-    results.push({ identity, summary });
+    results.push({ identity, summary, tps });
   }
 
   results.sort((a, b) => b.identity.lastSeenAt.getTime() - a.identity.lastSeenAt.getTime());
@@ -784,9 +1076,14 @@ export function filterProspects(
   utmFilter?: UtmFilter,
   segmentOptions?: { id: string; name: string }[]
 ): RecentProspect[] {
-  return matchingIdentities(identities, touchpoints, filter, utmFilter)
-    .filter((m) => m.summary) // "total" can include no-touchpoint identities with summary=null — nothing meaningful to show as a RecentProspect row for those (same exclusion buildPortalSummary's own `recent` list already applies)
-    .map((m) => toRecentProspect(m.identity, m.summary, segmentOptions));
+  // No longer filters out null-summary results here — toRecentProspect
+  // is now null-safe (falls back to "No tracked touch" etc rather than
+  // crashing), so whichever identities matchingIdentities decided to
+  // include (a zero-touchpoint one for "total", or for
+  // attributionIssue specifically) correctly show up as a real row,
+  // not get silently dropped by a blanket filter that predates
+  // toRecentProspect being able to handle this case at all.
+  return matchingIdentities(identities, touchpoints, filter, utmFilter).map((m) => toRecentProspect(m.identity, m.summary, m.tps, segmentOptions));
 }
 
 // Same filter, but returns the raw Identity rows instead of the
@@ -880,6 +1177,60 @@ export function buildPortalSummary(
   let wonCount = 0;
   const dealCreatedValueByCurrency = new Map<string, number>();
   const wonValueByCurrency = new Map<string, number>();
+  // OPEN deals only (has one, not yet Won) — a genuinely different
+  // population from dealCreatedValueByCurrency above, which includes
+  // deals that have SINCE won. "Pipeline value" specifically means
+  // "still in progress," so a won deal's value belongs in wonRevenue,
+  // not here, even though it also went through dealValueAtCreate once.
+  const pipelineValueByCurrency = new Map<string, number>();
+  // Attribution coverage/issues — computed across every identity that
+  // matches the active filter (same convention as totalIdentities
+  // above), NOT gated on the main loop's own `if (!summary) continue`,
+  // since a zero-touchpoint identity should correctly count as
+  // "missing" here rather than being silently excluded from the
+  // denominator. "attributed" is deliberately the ONLY bucket counted
+  // as covered — "direct" and "partial" are each legitimate, distinct
+  // buckets in their own right (see AttributionStatus's own reasoning),
+  // not partial credit toward this specific number. attributionIssues
+  // is "missing" + "partial" only — direct traffic isn't an issue, it's
+  // genuinely just direct.
+  let attributionAttributedCount = 0;
+  let attributionPartialCount = 0;
+  let attributionDirectCount = 0;
+  let attributionMissingCount = 0;
+  let attributionTotalCount = 0;
+  let attributedLeadsCount = 0;
+  for (const identity of identities) {
+    const tps = (byIdentity.get(identity.id) ?? []).slice().sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
+    const summary = buildAttributionSummary(tps);
+    if (!matchesUtmFilter(identity, summary, utmFilter)) continue;
+    attributionTotalCount++;
+    const { status } = classifyAttribution(tps);
+    if (status === "attributed") attributionAttributedCount++;
+    if (status === "partial") attributionPartialCount++;
+    if (status === "direct") attributionDirectCount++;
+    if (status === "missing") attributionMissingCount++;
+    if (identity.leadCreatedAt && status === "attributed") attributedLeadsCount++;
+  }
+  const attributionIssuesCount = attributionMissingCount + attributionPartialCount;
+  // Weighted score out of 100 — "attributed" is full credit (real
+  // structured tracking), "direct" is high-but-not-full credit
+  // (tracking is genuinely working, there's just no channel to
+  // attribute since none exists — not a gap, but also not the gold
+  // standard of a known campaign), "partial" is half credit (SOME
+  // signal, not structured), "missing" is zero (a genuine tracking
+  // gap). Weights are a judgment call, not a standard formula — chosen
+  // to reward real attribution clearly while still giving credit for
+  // honestly-direct traffic rather than penalizing it the same as an
+  // actual gap.
+  const attributionScore =
+    attributionTotalCount > 0
+      ? Math.round(
+          ((attributionAttributedCount * 1 + attributionDirectCount * 0.9 + attributionPartialCount * 0.5 + attributionMissingCount * 0) /
+            attributionTotalCount) *
+            100
+        )
+      : 0;
   // Tracks the population actually included below — equals
   // identities.length only when utmFilter is empty (backward-compatible
   // with every existing "Total tracked"/totalIdentities behavior); once
@@ -921,6 +1272,12 @@ export function buildPortalSummary(
         identity.dealCurrencyAtCreate,
         (dealCreatedValueByCurrency.get(identity.dealCurrencyAtCreate) ?? 0) + identity.dealValueAtCreate
       );
+      if (identity.wonDealId === null) {
+        pipelineValueByCurrency.set(
+          identity.dealCurrencyAtCreate,
+          (pipelineValueByCurrency.get(identity.dealCurrencyAtCreate) ?? 0) + identity.dealValueAtCreate
+        );
+      }
     }
     if (identity.wonDealId !== null && identity.dealValue !== null && identity.dealCurrency) {
       wonValueByCurrency.set(identity.dealCurrency, (wonValueByCurrency.get(identity.dealCurrency) ?? 0) + identity.dealValue);
@@ -1063,7 +1420,7 @@ export function buildPortalSummary(
       if (converted) bucket.converted++;
     }
 
-    recent.push(toRecentProspect(identity, summary, segmentOptions));
+    recent.push(toRecentProspect(identity, summary, tps, segmentOptions));
   }
 
   recent.sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime());
@@ -1170,7 +1527,26 @@ export function buildPortalSummary(
     // distinctUtmValues. A week-over-week volume comparison narrowed to
     // whatever filter happens to be active would mostly just reflect
     // the filter itself, not a real change worth surfacing.
-    notableChanges: computeNotableChanges(touchpoints),
+    notableChanges: computeNotableChanges(identities, touchpoints),
+    attributedLeadsCount,
+    dealsCreatedCount: dealCreatedCount,
+    wonDealsCount: wonCount,
+    pipelineValue: revenueMapToObject(pipelineValueByCurrency),
+    wonRevenue: revenueMapToObject(wonValueByCurrency),
+    attributionCoverage: {
+      covered: attributionAttributedCount + attributionPartialCount,
+      total: attributionTotalCount,
+      rate: attributionTotalCount > 0 ? (attributionAttributedCount + attributionPartialCount) / attributionTotalCount : 0,
+    },
+    attributionIssuesCount,
+    attributionBreakdown: {
+      attributed: attributionAttributedCount,
+      partial: attributionPartialCount,
+      direct: attributionDirectCount,
+      missing: attributionMissingCount,
+      total: attributionTotalCount,
+      score: attributionScore,
+    },
     distinctUtmValues,
   };
 }

@@ -33,6 +33,67 @@ export const CHANNEL_LABELS: Record<string, string> = {
   pipedrive_deal_created: "Deal created",
 };
 
+// Splits every channel into two categories, for the "Recently active
+// prospects" table's acquisition columns (see portal-summary.ts's
+// buildAcquisitionSummary): channels that answer "where did this person
+// come from" (a genuine marketing touch) vs. channels that just record
+// something happening inside Pipedrive (a CRM event). Mixing these up
+// was the actual root problem in the old "First touch: Lead created,
+// Source: pipedrive" display — "Lead created" is an EVENT, not an
+// acquisition channel, and showing it as if it were one is actively
+// misleading, not just imprecise. pipedrive_stage_change/
+// pipedrive_activity/pipedrive_note/pipedrive_lead_created/
+// pipedrive_deal_created are all deliberately CRM-only — everything
+// else counts as marketing.
+const CRM_EVENT_CHANNELS = new Set([
+  "pipedrive_activity",
+  "pipedrive_note",
+  "pipedrive_stage_change",
+  "pipedrive_lead_created",
+  "pipedrive_deal_created",
+]);
+
+export function isMarketingChannel(channel: string): boolean {
+  return !CRM_EVENT_CHANNELS.has(channel);
+}
+
+// Recognized platform domains, for turning a raw fallback-captured URL
+// (e.g. "https://www.instagram.com/p/DcJOBtlgfqT") into a clean display
+// name ("Instagram") — the RAW value stays available in full elsewhere
+// (the identity's touchpoint timeline, CSV exports) for anyone who
+// wants it; this is purely a table-display cleanup, not a new field of
+// its own. Deliberately just a hostname match, not an attempt to guess
+// paid vs. organic — a bare post URL genuinely can't tell you that (a
+// paid ad often promotes an existing organic post using that same
+// link) — see db.ts's Tenant.paidIndicatorField doc comment for the
+// full reasoning on why that specific inference isn't made here.
+const KNOWN_SOURCE_DOMAINS: { match: RegExp; name: string }[] = [
+  { match: /(^|\.)instagram\.com$/, name: "Instagram" },
+  { match: /(^|\.)facebook\.com$/, name: "Facebook" },
+  { match: /^fb\.me$/, name: "Facebook" },
+  { match: /(^|\.)tiktok\.com$/, name: "TikTok" },
+  { match: /(^|\.)youtube\.com$/, name: "YouTube" },
+  { match: /^youtu\.be$/, name: "YouTube" },
+  { match: /(^|\.)linkedin\.com$/, name: "LinkedIn" },
+  { match: /(^|\.)(twitter\.com|x\.com)$/, name: "Twitter/X" },
+  { match: /(^|\.)wa\.me$/, name: "WhatsApp" },
+  { match: /(^|\.)whatsapp\.com$/, name: "WhatsApp" },
+  { match: /(^|\.)google\.com$/, name: "Google" },
+];
+
+export function normalizeSourceForDisplay(rawSource: string | null): string | null {
+  if (!rawSource) return rawSource;
+  let url: URL;
+  try {
+    url = new URL(rawSource);
+  } catch {
+    return rawSource; // not a URL at all — already a clean value (e.g. "WhatsApp", "Referral"), shown as-is
+  }
+  const host = url.hostname.replace(/^www\./, "");
+  const known = KNOWN_SOURCE_DOMAINS.find((d) => d.match.test(host));
+  return known ? known.name : rawSource; // unrecognized domain — show the raw URL rather than guess
+}
+
 export interface AttributionSummary {
   firstTouchChannel: string;
   firstTouchSource: string;

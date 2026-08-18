@@ -465,6 +465,52 @@ a {
   margin-top: 4px;
 }
 
+.as-stat-card-clickable {
+  cursor: pointer;
+}
+
+.as-stat-card-clickable:hover {
+  border-color: var(--as-green);
+}
+
+.as-stat-subtext {
+  color: var(--as-body);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* Diagnostic/technical counts — deliberately smaller and less
+   prominent than the commercial metrics above, since a client opening
+   this dashboard cares about Won Revenue and Attribution Coverage
+   first, "touchpoints captured" second (if at all). Same 3-column
+   grid, just visually demoted. */
+.as-stat-grid-secondary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 32px;
+}
+
+.as-stat-card-secondary {
+  background: #fafbfc;
+  border: 1px solid var(--as-border);
+  border-radius: 12px;
+  padding: 12px 16px;
+}
+
+.as-stat-card-secondary .num {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--as-body);
+}
+
+.as-stat-card-secondary .label {
+  color: var(--as-body);
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
 .as-panels {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1040,6 +1086,11 @@ table.as-table th {
   white-space: nowrap;
 }
 
+table.as-table-layout-fixed td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 table.as-table td {
   padding: 10px;
   border-bottom: 1px solid #f1f3f5;
@@ -1048,6 +1099,76 @@ table.as-table td {
 
 table.as-table td:first-child {
   white-space: normal;
+}
+
+/* Resizable columns (dashboard.html's wireColumnResize) — scoped to
+   .as-table-resizable specifically (only the Recently active prospects
+   table), not the base .as-table class shared by every other table on
+   this dashboard, so this doesn't affect their unrelated layouts. */
+table.as-table-resizable th {
+  position: relative;
+}
+
+/* Added by lockColumnWidths right after every render, once every
+   column already has an explicit <col> width measured from its natural
+   size — see that function's own doc comment for why this can't just
+   be a static class on .as-table-resizable from the start (every
+   column would be forced into an equal share before any width was
+   ever measured). */
+table.as-table-layout-fixed {
+  table-layout: fixed;
+}
+
+.as-th-label {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.as-col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 1;
+}
+
+/* A visible, persistent divider line, not just a hover-only invisible
+   strip — the previous version was genuinely undiscoverable, since
+   there was nothing to see or find until you already knew to hover a
+   specific 10px gap between column headers. */
+.as-col-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 20%;
+  bottom: 20%;
+  left: 50%;
+  width: 1px;
+  background: var(--as-border);
+}
+
+.as-col-resize-handle:hover,
+body.as-col-resizing .as-col-resize-handle {
+  background: rgba(28, 138, 90, 0.25);
+}
+
+.as-col-resize-handle:hover::after,
+body.as-col-resizing .as-col-resize-handle::after {
+  background: var(--as-green);
+  width: 2px;
+}
+
+/* Applied to <body> for the duration of a drag, so the resize cursor
+   stays consistent even when the mouse briefly moves off the thin
+   handle itself mid-drag, and so text elsewhere on the page doesn't
+   get accidentally selected while dragging. */
+body.as-col-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .as-empty {
@@ -1095,6 +1216,34 @@ tr.as-row-clickable.expanded .as-row-chevron {
 tr.as-detail-row td {
   padding: 0;
   border-bottom: 1px solid #f1f3f5;
+}
+
+/* The "technical attribution data" grid shown above the touchpoint
+   timeline on row-expand (dashboard.html's renderAttributionDetail) —
+   raw UTMs, click IDs, referrer, etc, moved out of the main table's
+   default columns since this session's table redesign. */
+.as-attribution-detail {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px 24px;
+  padding: 18px 10px 8px 30px;
+  background: #fafbfc;
+  border-bottom: 1px solid #eef0f2;
+}
+
+.as-attribution-detail-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--as-body);
+  margin-bottom: 3px;
+}
+
+.as-attribution-detail-value {
+  font-size: 13.5px;
+  color: var(--as-ink);
+  word-break: break-word;
 }
 
 .as-timeline-wrap {
@@ -1483,6 +1632,7 @@ a.as-referrer-link:hover {
   .as-steps,
   .as-panels,
   .as-stat-grid,
+  .as-stat-grid-secondary,
   .as-screenshots-grid {
     grid-template-columns: 1fr;
   }

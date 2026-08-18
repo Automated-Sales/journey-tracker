@@ -303,6 +303,36 @@ function extractCustomFieldValue(data: any, key: string): unknown {
   return data?.[key];
 }
 
+/**
+ * Checks the tenant's configured "paid indicator" field (see db.ts's
+ * Tenant.paidIndicatorField doc comment) against THIS webhook payload.
+ * Returns false whenever nothing's configured, the configured field's
+ * entity doesn't match the CURRENT webhook (its value simply isn't on
+ * this payload — same natural constraint captureSegmentValue and the
+ * fallback fields above already work within), or the resolved value
+ * doesn't match any of the configured "paid" values.
+ */
+function checkPaidIndicator(tenant: Tenant, data: any, entity: "person" | "deal"): boolean {
+  let config: { key: string; entity: "person" | "deal"; values: string[]; options: { id: string; name: string }[] } | null = null;
+  try {
+    config = tenant.paidIndicatorField ? JSON.parse(tenant.paidIndicatorField) : null;
+  } catch {
+    config = null;
+  }
+  if (!config || config.entity !== entity) return false;
+
+  const rawValue = extractCustomFieldValue(data, config.key);
+  if (rawValue === undefined || rawValue === null || rawValue === "") return false;
+  const rawValues = Array.isArray(rawValue) ? rawValue : [rawValue];
+  const resolvedValues = rawValues
+    .map((v) => String(v).trim())
+    .filter(Boolean)
+    .map((v) => config!.options.find((o) => o.id === v)?.name ?? v);
+
+  const wantedValues = new Set(config.values.map((v) => v.trim().toLowerCase()));
+  return resolvedValues.some((v) => wantedValues.has(v.toLowerCase()));
+}
+
 async function applyLeadSourceFallback(
   tenant: Tenant,
   identity: Identity,
@@ -324,8 +354,7 @@ async function applyLeadSourceFallback(
 
   const existingTouchpoints = await db.touchpoint.findMany({
     where: { tenantId: tenant.id, identityId: identity.id },
-  });
-  // Channels excluded from counting as "real tracked data that should
+  });  // Channels excluded from counting as "real tracked data that should
   // block this" — they say that SALES ENGAGEMENT happened, but nothing
   // about WHERE the person originally came from, which is the specific
   // question this feature exists to answer. Confirmed live: a lead
@@ -353,7 +382,21 @@ async function applyLeadSourceFallback(
     "pipedrive_stage_change",
   ]);
   const realTouchpoints = existingTouchpoints.filter((tp) => !NON_BLOCKING_CHANNELS.has(tp.channel));
-  if (realTouchpoints.length > 0) return;
+  // Temporary diagnostic, re-added after being trimmed once things
+  // seemed to be working — still occasionally seeing "webhook arrives
+  // cleanly, no errors, but nothing changes on the dashboard" in live
+  // testing, so this makes the actual decision visible again instead of
+  // guessing at which check is responsible. Safe to trim once confirmed
+  // solid across a few more real tests.
+  console.log(
+    `[lead-source-fallback] tenant=${tenant.id} identity=${identity.id} entity=${entity} fieldsToTry=${fields
+      .map((f) => f.key)
+      .join(",")} existingTouchpoints=${existingTouchpoints.length} (channels: ${existingTouchpoints.map((t) => t.channel).join(", ") || "none"}) realTouchpoints=${realTouchpoints.length}`
+  );
+  if (realTouchpoints.length > 0) {
+    console.log(`[lead-source-fallback] BAILING — real (non-marker) touchpoints already exist`);
+    return;
+  }
 
   // Priority order — try each configured field in turn, first one with
   // a genuine value on THIS payload wins. A single Pipedrive account
@@ -364,6 +407,7 @@ async function applyLeadSourceFallback(
   // some intake channel permanently uncovered.
   for (const field of fields) {
     const rawValue = extractCustomFieldValue(data, field.key);
+    console.log(`[lead-source-fallback] field="${field.label}" key="${field.key}" rawValue=${JSON.stringify(rawValue)}`);
     if (rawValue === undefined || rawValue === null || rawValue === "") continue;
     // Not every configured field is plain text — a single-select/enum
     // field (e.g. "Lead Source") sends a raw option ID (often a
@@ -378,14 +422,25 @@ async function applyLeadSourceFallback(
       .map((v) => field.options.find((o) => o.id === v)?.name ?? v);
     if (!resolvedNames.length) continue;
     const resolved = resolvedNames.join(", ");
+    const isPaid = checkPaidIndicator(tenant, data, entity);
     await db.touchpoint.create({
       data: {
         tenantId: tenant.id,
         identityId: identity.id,
-        channel: "lead_source_field",
+        // "ad_click" when the paid indicator matches — the same
+        // channel genuinely tracked ad clicks use elsewhere, so a
+        // Click-to-WhatsApp Ad captured only through this fallback
+        // shows up consistently alongside REAL tracked ad-click data
+        // rather than living in its own separate, less specific
+        // bucket. See db.ts's Tenant.paidIndicatorField doc comment
+        // for the full reasoning, including why the source value
+        // itself (e.g. a bare Instagram URL) can't reliably tell paid
+        // from organic on its own.
+        channel: isPaid ? "ad_click" : "lead_source_field",
+        medium: isPaid ? "paid_social" : undefined,
         source: resolved,
         title: `Lead source (${field.label}): ${resolved}`,
-        metadata: JSON.stringify({ leadSourceFieldKey: field.key, rawValue }),
+        metadata: JSON.stringify({ leadSourceFieldKey: field.key, rawValue, isPaid }),
         // 1 second EARLIER than the passed-in occurredAt, not equal to
         // it — this fallback and the pipedrive_lead_created/
         // pipedrive_deal_created marker it's paired with are always

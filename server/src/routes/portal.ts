@@ -421,6 +421,68 @@ portalRouter.post("/api/settings/lead-source-field", requireSession, requireActi
 });
 
 /**
+ * The paid-indicator setting (see db.ts's Tenant.paidIndicatorField doc
+ * comment) — a SINGLE field + a list of "this means paid" values,
+ * unlike lead-source-field's ordered list, since there's typically just
+ * one reliable "was this paid" signal, not several competing ones. Same
+ * entity-merged Person+Deal field list and composite-key pattern as
+ * lead-source-field above.
+ */
+portalRouter.get("/api/settings/paid-indicator-field", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  let current: { key: string; name: string; values: string[] } | null = null;
+  try {
+    const parsed = tenant.paidIndicatorField ? JSON.parse(tenant.paidIndicatorField) : null;
+    current = parsed ? { key: `${parsed.entity}::${parsed.key}`, name: parsed.label, values: parsed.values } : null;
+  } catch {
+    current = null;
+  }
+
+  if (!tenant.pipedriveApiToken) {
+    return res.json({ current, fields: [], error: "No Pipedrive API token configured for this tenant yet." });
+  }
+
+  try {
+    const fields = await listEntityPrefixedFields(tenant.pipedriveApiToken);
+    res.json({ current, fields: fields.map((f) => ({ key: f.compositeKey, name: f.name })) });
+  } catch (err: any) {
+    console.error(`[settings] failed to list Pipedrive fields for tenant ${tenant.id}:`, err);
+    res.status(502).json({ current, fields: [], error: "Couldn't fetch fields from Pipedrive — check the API token is still valid." });
+  }
+});
+
+portalRouter.post("/api/settings/paid-indicator-field", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const compositeKey: unknown = req.body?.key;
+  const values: unknown = req.body?.values;
+
+  if (!compositeKey || !Array.isArray(values) || values.length === 0) {
+    await db.tenant.updatePaidIndicatorField(tenant.id, null);
+    return res.json({ ok: true, current: null });
+  }
+
+  if (!tenant.pipedriveApiToken) {
+    return res.status(400).json({ error: "No Pipedrive API token configured for this tenant." });
+  }
+
+  try {
+    const fields = await listEntityPrefixedFields(tenant.pipedriveApiToken);
+    const match = fields.find((f) => f.compositeKey === compositeKey);
+    if (!match) {
+      return res.status(400).json({ error: "That field no longer exists in Pipedrive — refresh the page and try again." });
+    }
+    const options = Array.isArray(match.options) ? match.options.map((o: any) => ({ id: String(o.id), name: String(o.label) })) : [];
+    const cleanValues = values.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
+    const record = { key: match.rawKey, label: match.name, entity: match.entity, values: cleanValues, options };
+    await db.tenant.updatePaidIndicatorField(tenant.id, JSON.stringify(record));
+    res.json({ ok: true, current: { key: `${record.entity}::${record.key}`, name: record.label, values: record.values } });
+  } catch (err: any) {
+    console.error(`[settings] failed to save paid-indicator field for tenant ${tenant.id}:`, err);
+    res.status(502).json({ error: "Couldn't verify that field against Pipedrive — try again." });
+  }
+});
+
+/**
  * The segment field setting (Johari's use case: Pipedrive Label,
  * generalized to any field a client wants to segment by — see db.ts's
  * Tenant.segmentFieldKey doc comment). Same GET/POST pattern as
@@ -751,7 +813,14 @@ function parseProspectFilterQuery(req: Request): ProspectFilter | { error: strin
   if (by === "campaign") return { type: "campaign", value };
   if (by === "segment") return { type: "segment", value };
   if (by === "assistedChannel") return { type: "assistedChannel", value };
-  return { error: "by must be one of: funnel, source, campaign, segment, assistedChannel" };
+  if (by === "attributionIssue") return { type: "attributionIssue", value: "true" };
+  if (by === "attributionStatus") {
+    if (!["attributed", "partial", "direct", "missing"].includes(value)) {
+      return { error: "value must be one of: attributed, partial, direct, missing" };
+    }
+    return { type: "attributionStatus", value: value as "attributed" | "partial" | "direct" | "missing" };
+  }
+  return { error: "by must be one of: funnel, source, campaign, segment, assistedChannel, attributionIssue, attributionStatus" };
 }
 
 /**

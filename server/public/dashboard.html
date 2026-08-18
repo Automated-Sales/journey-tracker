@@ -157,6 +157,26 @@
     </div>
 
     <div class="as-card as-install-card" style="margin-bottom:28px;">
+      <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Paid indicator</h3>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
+        A fallback source captured above (e.g. a bare Instagram post URL) genuinely can't tell paid from organic on its own — a paid ad often promotes an existing organic post using that exact same link. If one of your Pipedrive fields reliably marks a lead as paid (e.g. Johari's own "Lead Source (2)" field shows "CWTA" for Click-to-WhatsApp Ads), configure it here — any fallback source captured on a record where this matches will be classified as a genuine paid ad click instead of the generic fallback, directly comparable to real tracked ad clicks elsewhere on this dashboard.
+      </p>
+      <div id="paid-indicator-field-loading" style="font-size:13px; color:var(--as-body);">Loading your Pipedrive fields…</div>
+      <div id="paid-indicator-field-controls" style="display:none;">
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px;">
+          <select id="paid-indicator-field-select" class="as-select"><option value="">— None (off) —</option></select>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+          <input type="text" id="paid-indicator-values-input" class="as-select" placeholder="Value(s) that mean paid, comma-separated — e.g. CWTA" style="min-width:280px;" />
+        </div>
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:16px;">
+          <button class="as-btn as-btn-primary" id="paid-indicator-field-save">Save</button>
+          <span id="paid-indicator-field-status" style="font-size:13px; color:var(--as-body);"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="as-card as-install-card" style="margin-bottom:28px;">
       <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Segment field</h3>
       <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
         If you use a Pipedrive field to categorize enquiries — a Label for which product an enquiry is about, for example — pick it below to segment the whole dashboard by it. It'll appear as a filter alongside Source/Medium/Campaign, and in the Recently active prospects table. Unlike Lead source fallback above, this always reflects the current value in Pipedrive, so an edit there shows up here too.
@@ -228,17 +248,51 @@
 
     <div class="as-stat-grid">
       <div class="as-stat-card">
+        <div class="num" id="stat-attributed-leads">–</div>
+        <div class="label">Attributed Leads</div>
+      </div>
+      <div class="as-stat-card">
+        <div class="num" id="stat-deals-created">–</div>
+        <div class="label">Deals Created</div>
+      </div>
+      <div class="as-stat-card">
+        <div class="num" id="stat-won-deals">–</div>
+        <div class="label">Won Deals</div>
+      </div>
+      <div class="as-stat-card">
+        <div class="num" id="stat-pipeline-value">–</div>
+        <div class="label">Pipeline Value</div>
+      </div>
+      <div class="as-stat-card">
+        <div class="num" id="stat-won-revenue">–</div>
+        <div class="label">Won Revenue</div>
+      </div>
+      <div class="as-stat-card as-stat-card-clickable" id="stat-attribution-coverage-card" title="Click to see contacts with missing or partial attribution">
+        <div class="num" id="stat-attribution-coverage">–</div>
+        <div class="label">Attribution Coverage</div>
+        <div class="as-stat-subtext" id="stat-attribution-coverage-detail"></div>
+      </div>
+    </div>
+
+    <div class="as-stat-grid-secondary">
+      <div class="as-stat-card-secondary">
         <div class="num" id="stat-identities">–</div>
         <div class="label">Identified prospects</div>
       </div>
-      <div class="as-stat-card">
+      <div class="as-stat-card-secondary">
         <div class="num" id="stat-touchpoints">–</div>
         <div class="label">Touchpoints captured</div>
       </div>
-      <div class="as-stat-card">
+      <div class="as-stat-card-secondary">
         <div class="num" id="stat-total">–</div>
         <div class="label">Total tracked visitors/contacts</div>
       </div>
+    </div>
+
+    <div class="as-card" id="attribution-health-card" style="margin-bottom:20px;">
+      <p class="as-panel-title">Attribution health</p>
+      <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">Not just whether tracking is on, but whether it's actually working — a single score, plus every contact broken down by how much we genuinely know about where they came from. Click any row to see exactly who's in it.</p>
+      <div id="attribution-health"></div>
     </div>
 
     <div class="as-card as-utm-filter-bar" style="margin-bottom:20px;">
@@ -654,6 +708,51 @@
     return (Math.round(avgTouchpoints * 10) / 10).toString();
   }
 
+  var ATTRIBUTION_STATUS_META = {
+    attributed: { icon: '🟢', label: 'Attributed', color: '#1c8a5a' },
+    partial: { icon: '🟡', label: 'Partial', color: '#C77D19' },
+    direct: { icon: '⚪', label: 'Direct', color: '#8A8A8A' },
+    missing: { icon: '🔴', label: 'Missing', color: '#a13d2f' },
+  };
+
+  function renderAttributionHealth(container, breakdown) {
+    var scoreHtml =
+      '<div style="display:flex; align-items:baseline; gap:10px; margin-bottom:18px;">' +
+      '<div style="font-size:36px; font-weight:800; line-height:1;">' + breakdown.score + '</div>' +
+      '<div style="color:var(--as-body); font-size:13.5px;">/ 100 attribution health score</div>' +
+      '</div>';
+
+    if (breakdown.total === 0) {
+      container.innerHTML = scoreHtml + '<div class="as-empty">No tracked contacts yet.</div>';
+      return;
+    }
+
+    var max = Math.max(breakdown.attributed, breakdown.partial, breakdown.direct, breakdown.missing);
+    var rowsHtml = ['attributed', 'partial', 'direct', 'missing']
+      .map(function (key) {
+        var meta = ATTRIBUTION_STATUS_META[key];
+        var count = breakdown[key];
+        var widthPct = max > 0 ? Math.max(4, (count / max) * 100) : 0;
+        var pct = Math.round((count / breakdown.total) * 100);
+        return (
+          '<div class="as-bar-row as-clickable-row" data-status="' + key + '">' +
+          '<div class="as-bar-label">' + meta.icon + ' ' + meta.label + '</div>' +
+          '<div class="as-bar-track"><div class="as-bar-fill" style="width:' + widthPct + '%; background:' + meta.color + ';"></div></div>' +
+          '<div class="as-bar-count">' + count + ' <span style="color:var(--as-body); font-weight:600;">(' + pct + '%)</span></div>' +
+          '</div>'
+        );
+      })
+      .join('');
+
+    container.innerHTML = scoreHtml + rowsHtml;
+    container.querySelectorAll('[data-status]').forEach(function (row) {
+      row.addEventListener('click', function () {
+        var status = row.getAttribute('data-status');
+        openProspectModal('attributionStatus', status, ATTRIBUTION_STATUS_META[status].label + ' attribution');
+      });
+    });
+  }
+
   // Simple ranked list, not a full table like the conversion reports —
   // there's really only one number worth showing per channel here (what
   // share of Won deals had it appear anywhere), so a table's extra
@@ -1009,7 +1108,7 @@
 
   var prospectCache = {};
 
-  function toggleProspectRow(row, identityId) {
+  function toggleProspectRow(row, identityId, rowData) {
     var expanded = row.classList.contains('expanded');
     var existingDetail = row.nextElementSibling;
     if (existingDetail && existingDetail.classList.contains('as-detail-row')) {
@@ -1021,7 +1120,10 @@
     var colCount = row.children.length;
     var detailRow = document.createElement('tr');
     detailRow.className = 'as-detail-row';
-    detailRow.innerHTML = '<td colspan="' + colCount + '"><div class="as-timeline-wrap"><div class="as-timeline-loading">Loading history…</div></div></td>';
+    detailRow.innerHTML =
+      '<td colspan="' + colCount + '">' +
+      (rowData ? renderAttributionDetail(rowData) : '') +
+      '<div class="as-timeline-wrap"><div class="as-timeline-loading">Loading history…</div></div></td>';
     row.parentNode.insertBefore(detailRow, row.nextSibling);
 
     var wrap = detailRow.querySelector('.as-timeline-wrap');
@@ -1038,6 +1140,42 @@
       .catch(function () {
         wrap.innerHTML = '<div class="as-timeline-empty">Couldn’t load this contact’s history — try again.</div>';
       });
+  }
+
+  // The "technical attribution data" block shown above the touchpoint
+  // timeline when a row expands — everything that used to live in its
+  // own table column before this session's redesign moved the default
+  // columns to a cleaner Contact/Status/Channel/Source/Campaign set.
+  // Nothing here is fetched separately — it's the exact same RecentProspect
+  // row object already used to render the table itself, just laid out
+  // as a compact grid of labeled fields instead of table cells. Skips
+  // any field that's genuinely empty rather than showing a wall of dashes.
+  function renderAttributionDetail(r) {
+    var fields = [
+      { label: 'Full source (raw)', value: r.acquisitionSourceRaw },
+      { label: 'UTM medium', value: r.firstTouchMedium },
+      { label: 'UTM term', value: r.firstTouchTerm },
+      { label: 'UTM content', value: r.firstTouchContent },
+      { label: 'GCLID', value: r.firstTouchGclid },
+      { label: 'FBCLID', value: r.firstTouchFbclid },
+      { label: 'Landing page', value: r.acquisitionLandingPage },
+      { label: 'Referrer', value: r.firstTouchReferrer },
+      { label: 'Segment', value: r.segmentLabel },
+      { label: 'Touchpoints: Lead → Deal', value: r.leadToDealTouchpoints !== null && r.leadToDealTouchpoints !== undefined ? String(r.leadToDealTouchpoints) : null },
+      { label: 'Touchpoints: Deal → Won', value: r.dealToWonTouchpoints !== null && r.dealToWonTouchpoints !== undefined ? String(r.dealToWonTouchpoints) : null },
+      { label: 'Total touchpoints', value: String(r.touchpointCount) },
+    ].filter(function (f) { return f.value !== null && f.value !== undefined && f.value !== ''; });
+
+    if (!fields.length) return '';
+    return (
+      '<div class="as-attribution-detail">' +
+      fields
+        .map(function (f) {
+          return '<div class="as-attribution-detail-field"><div class="as-attribution-detail-label">' + esc(f.label) + '</div><div class="as-attribution-detail-value">' + esc(f.value) + '</div></div>';
+        })
+        .join('') +
+      '</div>'
+    );
   }
 
   // Blank/empty cell, styled to match the existing "—" used for a missing
@@ -1099,14 +1237,50 @@
     // two, when email is unknown).
     { key: 'name', label: 'Name', render: function (r) { return cellOrDash(r.name); } },
     { key: 'phone', label: 'Phone', render: function (r) { return cellOrDash(r.phone); } },
-    { key: 'firstTouch', label: 'First touch', render: function (r) { return channelBadge(r.firstTouchChannel); } },
+    {
+      key: 'status',
+      label: 'Status',
+      headerTitle: 'How far this contact has gotten commercially — Tracked (seen, not yet a Lead), Lead, Deal, or Won',
+      render: function (r) {
+        var labels = { tracked: 'Tracked', lead: 'Lead', deal: 'Deal', won: 'Won' };
+        var colors = { tracked: '#8A8A8A', lead: '#C77D19', deal: '#2E7D32', won: '#1c8a5a' };
+        return '<span class="as-timeline-badge" style="color:' + colors[r.status] + '">' + esc(labels[r.status] || r.status) + '</span>';
+      },
+    },
+    {
+      key: 'attribution',
+      label: 'Attribution',
+      headerTitle:
+        'Attributed: a real UTM campaign or ad click ID. Partial: a recognized channel but no structured campaign data (including anything from the Lead source fallback, which is a best-effort guess, not real tracking). Direct: genuine direct traffic — no referrer or UTM at all. Missing: no marketing touchpoint at all, only CRM events — our tracking never saw this person.',
+      render: function (r) {
+        var meta = {
+          attributed: { icon: '🟢', label: 'Attributed' },
+          partial: { icon: '🟡', label: 'Partial' },
+          direct: { icon: '⚪', label: 'Direct' },
+          missing: { icon: '🔴', label: 'Missing' },
+        }[r.attributionStatus] || { icon: '⚪', label: r.attributionStatus };
+        return '<span title="' + esc(meta.label) + '">' + meta.icon + ' ' + esc(meta.label) + '</span>';
+      },
+    },
+    {
+      key: 'firstTouch',
+      label: 'Channel',
+      headerTitle:
+        'The first REAL marketing touch — an ad click, organic social, email, or the Lead source fallback. Deliberately excludes CRM events (Lead created, a logged Activity, etc), which say nothing about where this person actually came from — see the expanded row for the full event timeline including those.',
+      render: function (r) { return r.acquisitionChannel ? channelBadge(r.acquisitionChannel) : '<span class="as-pd-none">—</span>'; },
+    },
     {
       key: 'source',
       label: 'Source',
-      render: function (r) { return cellOrDash(r.firstTouchSource === 'website' ? null : r.firstTouchSource); },
+      headerTitle: 'Normalized for display (e.g. a bare Instagram post URL shows as "Instagram") — hover for the original raw value.',
+      render: function (r) {
+        if (!r.acquisitionSource) return '<span class="as-pd-none">—</span>';
+        var title = r.acquisitionSourceRaw && r.acquisitionSourceRaw !== r.acquisitionSource ? ' title="' + esc(r.acquisitionSourceRaw) + '"' : '';
+        return '<span' + title + '>' + esc(r.acquisitionSource) + '</span>';
+      },
     },
     { key: 'medium', label: 'Medium', render: function (r) { return cellOrDash(r.firstTouchMedium); } },
-    { key: 'campaign', label: 'Campaign', render: function (r) { return cellOrDash(r.firstTouchCampaign); } },
+    { key: 'campaign', label: 'Campaign', render: function (r) { return cellOrDash(r.acquisitionCampaign); } },
     { key: 'term', label: 'Term', render: function (r) { return cellOrDash(r.firstTouchTerm); } },
     { key: 'content', label: 'Content', render: function (r) { return cellOrDash(r.firstTouchContent); } },
     { key: 'gclid', label: 'GCLID', render: function (r) { return cellOrDash(r.firstTouchGclid); } },
@@ -1137,7 +1311,13 @@
           : '<span class="as-pd-none">—</span>';
       },
     },
-    { key: 'lastTouch', label: 'Last touch', render: function (r) { return channelBadge(r.lastTouchChannel); } },
+    {
+      key: 'lastTouch',
+      label: 'Last touch',
+      headerTitle:
+        "What happened most recently, of ANY kind — unlike Channel above, this deliberately DOES include CRM events (a logged call, a WhatsApp message, a Deal moving stage). That's usually exactly what you want to know here: what just happened right before where things stand today, not just where the person originally came from.",
+      render: function (r) { return channelBadge(r.lastTouchChannel); },
+    },
     { key: 'totalTouchpoints', label: 'Total touchpoints', render: function (r) { return esc(r.touchpointCount); } },
     {
       key: 'leadToDeal',
@@ -1168,14 +1348,16 @@
 
   // Columns hidden on a completely fresh browser (no saved preference
   // yet) or after "Reset to default" — curated rather than "show
-  // everything," since RECENT_COLUMNS has grown to 20 columns across
+  // everything," since RECENT_COLUMNS has grown to 22 columns across
   // several sessions of additions and showing all of them by default
-  // makes the table sprawl far wider than the page on first load. Core
-  // reporting columns stay visible; more niche/debugging ones (raw
-  // click IDs, Name/Phone which duplicate Contact's own fallback
-  // chain, the touchpoint-count breakdown) are a Columns click away
+  // makes the table sprawl far wider than the page on first load. The
+  // agreed default set is: Contact, Pipedrive, Status, Attribution,
+  // Deal value, Channel, Source, Campaign, Last touch, Segment (when
+  // configured), Last seen — everything else (raw click IDs, Medium/
+  // Term/Content, Name/Phone which duplicate Contact's own fallback
+  // chain, the touchpoint-count breakdown) is a Columns click away
   // rather than gone.
-  var DEFAULT_HIDDEN_COLUMN_KEYS = ['name', 'phone', 'term', 'content', 'gclid', 'fbclid', 'referrer', 'leadToDeal', 'dealToWon'];
+  var DEFAULT_HIDDEN_COLUMN_KEYS = ['name', 'phone', 'medium', 'term', 'content', 'gclid', 'fbclid', 'referrer', 'totalTouchpoints', 'leadToDeal', 'dealToWon'];
 
   function loadColumnPrefs() {
     var allKeys = RECENT_COLUMNS.map(function (c) { return c.key; });
@@ -1199,7 +1381,13 @@
       var col = RECENT_COLUMNS_BY_KEY[k];
       return !!col && !col.alwaysVisible; // e.g. 'contact' can never end up hidden, even from stale/tampered saved state
     });
-    return { order: order, hidden: hidden };
+    // Per-column pixel widths from dragging a resize handle (see
+    // wireColumnResize) — only present for columns someone has actually
+    // resized; everything else stays auto-width. Cleared by "Reset to
+    // default" along with order/hidden, same as every other column
+    // preference — all part of one saved object under one key.
+    var widths = saved && saved.widths && typeof saved.widths === 'object' ? saved.widths : {};
+    return { order: order, hidden: hidden, widths: widths };
   }
 
   function saveColumnPrefs(prefs) {
@@ -1301,9 +1489,27 @@
       .map(function (k) { return RECENT_COLUMNS_BY_KEY[k]; })
       .filter(Boolean);
 
+    // <colgroup> is what actually makes a saved width stick — setting
+    // width directly on <th>/<td> elements gets overridden by content
+    // sizing the moment table-layout isn't fixed, and switching the
+    // WHOLE table to table-layout:fixed would force every column
+    // (including ones nobody's resized) into equal shares instead of
+    // its natural content width. A per-column <col> avoids both.
+    var colgroupHtml = visibleColumns
+      .map(function (c) {
+        var w = recentColumnPrefs.widths[c.key];
+        return '<col' + (w ? ' style="width:' + w + 'px"' : '') + ' data-col-key="' + esc(c.key) + '" />';
+      })
+      .join('');
+
     var theadHtml = visibleColumns
       .map(function (c) {
-        return '<th' + (c.headerTitle ? ' title="' + esc(c.headerTitle) + '"' : '') + '>' + esc(c.label) + '</th>';
+        return (
+          '<th' + (c.headerTitle ? ' title="' + esc(c.headerTitle) + '"' : '') + '>' +
+          '<span class="as-th-label">' + esc(c.label) + '</span>' +
+          '<span class="as-col-resize-handle" data-col-key="' + esc(c.key) + '"></span>' +
+          '</th>'
+        );
       })
       .join('');
 
@@ -1320,15 +1526,20 @@
       .join('');
 
     container.innerHTML =
-      '<div class="as-table-scroll"><table class="as-table"><thead><tr>' +
+      '<div class="as-table-scroll"><table class="as-table as-table-resizable"><colgroup>' +
+      colgroupHtml +
+      '</colgroup><thead><tr>' +
       theadHtml +
       '</tr></thead><tbody>' +
       bodyHtml +
       '</tbody></table></div>';
 
-    container.querySelectorAll('tr.as-row-clickable').forEach(function (row) {
+    lockColumnWidths(container);
+    wireColumnResize(container);
+
+    container.querySelectorAll('tr.as-row-clickable').forEach(function (row, i) {
       row.addEventListener('click', function () {
-        toggleProspectRow(row, row.getAttribute('data-identity-id'));
+        toggleProspectRow(row, row.getAttribute('data-identity-id'), rows[i]);
       });
     });
     // The Pipedrive/referrer links live inside a clickable row — without
@@ -1337,6 +1548,77 @@
     container.querySelectorAll('a.as-pd-link, a.as-referrer-link').forEach(function (link) {
       link.addEventListener('click', function (event) {
         event.stopPropagation();
+      });
+    });
+  }
+
+  var COLUMN_MIN_WIDTH = 60;
+
+  // Makes drag-resize actually take visual effect. <col> width hints are
+  // mostly IGNORED by the browser's default table-layout:auto — it keeps
+  // recomputing column widths from cell content regardless of what a
+  // <col> says, which is exactly why setting col.style.width during a
+  // drag alone did nothing. The standard fix: measure every column's
+  // current NATURAL width first (while still in auto layout, so
+  // unresized columns keep their normal content-based sizing), lock
+  // each one in as an explicit <col> width, THEN switch to
+  // table-layout:fixed — only once every column already has a real
+  // width does fixed layout stop meaning "force them all into equal
+  // shares." Runs once right after every render, before any drag
+  // happens; wireColumnResize's own drag logic then only needs to
+  // update an already-fixed column's width, not fight the layout
+  // algorithm on every mousemove.
+  function lockColumnWidths(container) {
+    var table = container.querySelector('table.as-table-resizable');
+    if (!table) return;
+    var ths = table.querySelectorAll('thead th');
+    var cols = table.querySelectorAll('colgroup col');
+    ths.forEach(function (th, i) {
+      var col = cols[i];
+      if (!col) return;
+      var key = col.getAttribute('data-col-key');
+      var width = recentColumnPrefs.widths[key] || th.offsetWidth;
+      col.style.width = width + 'px';
+    });
+    table.classList.add('as-table-layout-fixed');
+  }
+
+  // Drag-to-resize for the Recently active prospects table's columns.
+  // Deliberately mouse-only (no touch handling) — this is a power-user
+  // desktop refinement, and building solid touch drag support alongside
+  // it (which needs its own event set and tends to fight the table's
+  // existing horizontal scroll gesture) wasn't worth the added
+  // complexity for what's fundamentally a "nice to have" on mobile.
+  function wireColumnResize(container) {
+    container.querySelectorAll('.as-col-resize-handle').forEach(function (handle) {
+      handle.addEventListener('mousedown', function (event) {
+        event.preventDefault();
+        event.stopPropagation(); // don't also trigger a header click/sort if one's ever added later
+        var key = handle.getAttribute('data-col-key');
+        var col = container.querySelector('col[data-col-key="' + key + '"]');
+        var th = handle.closest('th');
+        if (!col || !th) return;
+        var startX = event.clientX;
+        // th.offsetWidth reflects the column's CURRENT rendered width
+        // whether that came from a previously-saved <col> width or pure
+        // content-based auto-sizing — either way, this is the correct
+        // starting point to drag from.
+        var startWidth = th.offsetWidth;
+        document.body.classList.add('as-col-resizing');
+
+        function onMouseMove(moveEvent) {
+          var newWidth = Math.max(COLUMN_MIN_WIDTH, startWidth + (moveEvent.clientX - startX));
+          col.style.width = newWidth + 'px';
+        }
+        function onMouseUp() {
+          document.removeEventListener('mousemove', onMouseMove);
+          document.removeEventListener('mouseup', onMouseUp);
+          document.body.classList.remove('as-col-resizing');
+          recentColumnPrefs.widths[key] = parseInt(col.style.width, 10);
+          saveColumnPrefs(recentColumnPrefs);
+        }
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
       });
     });
   }
@@ -1611,6 +1893,58 @@
       });
   }
 
+  // Simpler than renderLeadSourceFieldSettings above — one field, not
+  // an ordered list, plus a text input for the "this means paid"
+  // value(s). Same entity-merged Person+Deal field list under the hood.
+  function renderPaidIndicatorFieldSettings() {
+    var loading = document.getElementById('paid-indicator-field-loading');
+    var controls = document.getElementById('paid-indicator-field-controls');
+    var select = document.getElementById('paid-indicator-field-select');
+    var valuesInput = document.getElementById('paid-indicator-values-input');
+    var status = document.getElementById('paid-indicator-field-status');
+
+    fetch('/api/settings/paid-indicator-field', { credentials: 'include' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        loading.style.display = 'none';
+        if (data.error && !data.fields.length) {
+          loading.style.display = 'block';
+          loading.textContent = data.error;
+          return;
+        }
+        controls.style.display = 'block';
+        select.innerHTML =
+          '<option value="">— None (off) —</option>' +
+          data.fields.map(function (f) {
+            var selected = data.current && data.current.key === f.key ? ' selected' : '';
+            return '<option value="' + esc(f.key) + '"' + selected + '>' + esc(f.name) + '</option>';
+          }).join('');
+        valuesInput.value = data.current && data.current.values ? data.current.values.join(', ') : '';
+
+        document.getElementById('paid-indicator-field-save').addEventListener('click', function () {
+          status.textContent = 'Saving…';
+          var values = valuesInput.value.split(',').map(function (v) { return v.trim(); }).filter(Boolean);
+          fetch('/api/settings/paid-indicator-field', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: select.value || null, values: values }),
+          })
+            .then(function (r) { return r.ok ? r.json() : r.json().then(function (e) { throw new Error(e.error || 'failed'); }); })
+            .then(function () {
+              status.textContent = 'Saved.';
+              setTimeout(function () { status.textContent = ''; }, 2000);
+            })
+            .catch(function (err) {
+              status.textContent = err.message === 'failed' ? 'Could not save — try again.' : err.message;
+            });
+        });
+      })
+      .catch(function () {
+        loading.textContent = "Couldn't load your Pipedrive fields — try refreshing the page.";
+      });
+  }
+
   // Same GET/POST pattern as renderLeadSourceFieldSettings above, but a
   // successful save also refetches the reports/filter bar (see
   // refreshReports) — unlike Lead source fallback, changing this field
@@ -1779,6 +2113,23 @@
     document.getElementById('stat-identities').textContent = s.identifiedIdentities;
     document.getElementById('stat-touchpoints').textContent = s.totalTouchpoints;
     document.getElementById('stat-total').textContent = s.totalIdentities;
+
+    document.getElementById('stat-attributed-leads').textContent = s.attributedLeadsCount;
+    document.getElementById('stat-deals-created').textContent = s.dealsCreatedCount;
+    document.getElementById('stat-won-deals').textContent = s.wonDealsCount;
+    document.getElementById('stat-pipeline-value').textContent = formatRevenue(s.pipelineValue);
+    document.getElementById('stat-won-revenue').textContent = formatRevenue(s.wonRevenue);
+
+    var coveragePct = s.attributionCoverage.total > 0 ? Math.round((s.attributionCoverage.covered / s.attributionCoverage.total) * 100) : 0;
+    document.getElementById('stat-attribution-coverage').textContent = coveragePct + '%';
+    document.getElementById('stat-attribution-coverage-detail').textContent =
+      s.attributionCoverage.covered + ' of ' + s.attributionCoverage.total + ' tracked contacts have a known source' +
+      (s.attributionIssuesCount > 0 ? ' · ' + s.attributionIssuesCount + ' worth improving' : '');
+    document.getElementById('stat-attribution-coverage-card').onclick = function () {
+      openProspectModal('attributionIssue', 'true', 'Attribution issues (missing or partial)');
+    };
+
+    renderAttributionHealth(document.getElementById('attribution-health'), s.attributionBreakdown);
 
     populateUtmFilterOptions(s.distinctUtmValues);
     document.getElementById('utm-filter-clear').style.display = qs ? 'inline-block' : 'none';
@@ -1954,6 +2305,7 @@
     renderInstall(me.install, s.totalTouchpoints > 0);
     renderVisitLogging(me);
     renderLeadSourceFieldSettings();
+    renderPaidIndicatorFieldSettings();
     renderSegmentFieldSettings();
 
     document.getElementById('loading').style.display = 'none';
