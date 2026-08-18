@@ -370,7 +370,15 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
             const leadToDealTouchpoints = countTouchpointsUpTo(touchpoints, createdAt);
             await db.identity.setDealMilestone({
               where: { tenantId: tenant.id, id: identity.id },
-              data: { dealCreatedDealId: data.id, dealCreatedAt: createdAt, leadToDealTouchpoints },
+              data: {
+                dealCreatedDealId: data.id,
+                dealCreatedAt: createdAt,
+                leadToDealTouchpoints,
+                // Best-effort, same partial-diff caveat as the Won
+                // handler's own value capture — no live-fetch fallback.
+                dealValueAtCreate: typeof data.value === "number" ? data.value : undefined,
+                dealCurrencyAtCreate: typeof data.currency === "string" ? data.currency : undefined,
+              },
             });
             await syncDealMilestoneField(tenant, data.id, "deal_lead_to_deal_touchpoints", leadToDealTouchpoints);
           }

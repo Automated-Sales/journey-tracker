@@ -154,6 +154,8 @@ async function init() {
   ensureColumn("identities", "dealWonAt", "TEXT");
   ensureColumn("identities", "dealValue", "REAL");
   ensureColumn("identities", "dealCurrency", "TEXT");
+  ensureColumn("identities", "dealValueAtCreate", "REAL");
+  ensureColumn("identities", "dealCurrencyAtCreate", "TEXT");
   // Added when Lead-level (pre-Deal-conversion) attribution sync was
   // built — see pipedrive-sync.ts's syncLeadAttribution and
   // webhooks.ts's "lead" entity handler. Any tenant row created before
@@ -330,6 +332,15 @@ export interface Identity {
   // comment for why summing across different currencies would be wrong.
   dealValue: number | null;
   dealCurrency: string | null;
+  // Value at the moment the Deal was CREATED (an early estimate, which
+  // can differ from dealValue's final Won figure) — captured
+  // specifically so the funnel's Value view has something real to show
+  // at the "Deal created" stage, not just "Won". Deliberately kept as
+  // separate columns rather than overwriting dealValue/dealCurrency,
+  // since conflating an early estimate with the actually-closed number
+  // would make dealValue's own meaning ambiguous.
+  dealValueAtCreate: number | null;
+  dealCurrencyAtCreate: string | null;
 }
 
 // The single, shared definition of "not anonymous" — used by the
@@ -447,6 +458,9 @@ function rowToIdentity(row: any): Identity | null {
     dealWonAt: row.dealWonAt ? new Date(row.dealWonAt) : null,
     dealValue: typeof row.dealValue === "number" ? row.dealValue : row.dealValue ? Number(row.dealValue) : null,
     dealCurrency: row.dealCurrency ?? null,
+    dealValueAtCreate:
+      typeof row.dealValueAtCreate === "number" ? row.dealValueAtCreate : row.dealValueAtCreate ? Number(row.dealValueAtCreate) : null,
+    dealCurrencyAtCreate: row.dealCurrencyAtCreate ?? null,
   };
 }
 
@@ -877,6 +891,8 @@ export const db = {
           | "dealWonAt"
           | "dealValue"
           | "dealCurrency"
+          | "dealValueAtCreate"
+          | "dealCurrencyAtCreate"
         >
       >;
     }) {
@@ -894,7 +910,7 @@ export const db = {
           ? new Date(merged.dealWonAt as Date | string).toISOString()
           : null;
         sqlite.run(
-          `UPDATE identities SET dealCreatedDealId = ?, dealCreatedAt = ?, leadToDealTouchpoints = ?, wonDealId = ?, dealToWonTouchpoints = ?, dealWonAt = ?, dealValue = ?, dealCurrency = ? WHERE tenantId = ? AND id = ?`,
+          `UPDATE identities SET dealCreatedDealId = ?, dealCreatedAt = ?, leadToDealTouchpoints = ?, wonDealId = ?, dealToWonTouchpoints = ?, dealWonAt = ?, dealValue = ?, dealCurrency = ?, dealValueAtCreate = ?, dealCurrencyAtCreate = ? WHERE tenantId = ? AND id = ?`,
           [
             merged.dealCreatedDealId ?? null,
             dealCreatedAtIso,
@@ -904,6 +920,8 @@ export const db = {
             dealWonAtIso,
             merged.dealValue ?? null,
             merged.dealCurrency ?? null,
+            merged.dealValueAtCreate ?? null,
+            merged.dealCurrencyAtCreate ?? null,
             where.tenantId,
             where.id,
           ]

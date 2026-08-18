@@ -192,6 +192,11 @@
 
     <div class="as-card" style="margin-bottom:20px;">
       <p class="as-panel-title">Conversion funnel</p>
+      <div class="as-sort-toggle">
+        <span class="as-sort-toggle-label">Show:</span>
+        <button type="button" class="as-sort-btn as-sort-btn-active" id="funnel-mode-count">Count</button>
+        <button type="button" class="as-sort-btn" id="funnel-mode-value" title="Only 'Deal created' and 'Won' have a real monetary figure — the earlier stages have no value concept in Pipedrive, so they're left out of this view rather than shown as a misleading £0.">Value</button>
+      </div>
       <div id="funnel"></div>
     </div>
 
@@ -377,13 +382,24 @@
     'Won': 'won',
   };
 
-  function renderFunnel(container, rows) {
-    if (!rows.length || rows[0].count === 0) {
+  var lastFunnelCounts = [];
+  var lastFunnelValue = [];
+  var funnelMode = 'count';
+
+  function renderFunnel(counts, valueRows) {
+    lastFunnelCounts = counts;
+    lastFunnelValue = valueRows;
+    var container = document.getElementById('funnel');
+    if (funnelMode === 'value') {
+      renderFunnelValueMode(container, valueRows);
+      return;
+    }
+    if (!counts.length || counts[0].count === 0) {
       container.innerHTML = '<div class="as-empty">No data yet — tracking will populate this once visitors are identified.</div>';
       return;
     }
-    var max = rows[0].count; // "Total tracked" is always first and always the largest, by construction
-    container.innerHTML = '<div class="as-funnel">' + rows
+    var max = counts[0].count; // "Total tracked" is always first and always the largest, by construction
+    container.innerHTML = '<div class="as-funnel">' + counts
       .map(function (r) {
         var pct = max > 0 ? Math.round((r.count / max) * 100) : 0;
         var widthPct = max > 0 ? Math.max(r.count > 0 ? 4 : 0, (r.count / max) * 100) : 0;
@@ -397,6 +413,42 @@
         );
       })
       .join('') + '</div>';
+    container.querySelectorAll('[data-filter-by]').forEach(function (row) {
+      if (!row.classList.contains('as-clickable-row')) return;
+      row.addEventListener('click', function () {
+        openProspectModal(row.getAttribute('data-filter-by'), row.getAttribute('data-filter-value'), row.getAttribute('data-filter-label'));
+      });
+    });
+  }
+
+  // Deliberately NOT the same proportional-bar visual as Count mode —
+  // only 2 of the 5 funnel stages have a real monetary figure (see the
+  // Value toggle's own title text), so forcing them into the same
+  // 5-row bar comparison would either mislead (showing "£0" bars for
+  // stages with no value concept) or need awkward special-casing. Two
+  // plain, clearly-labeled figures side by side is more honest about
+  // what's actually known.
+  function renderFunnelValueMode(container, valueRows) {
+    if (!valueRows.length) {
+      container.innerHTML = '<div class="as-empty">No value data yet.</div>';
+      return;
+    }
+    container.innerHTML =
+      '<div class="as-funnel-value-grid">' +
+      valueRows
+        .map(function (r) {
+          var formatted = formatRevenue(r.value);
+          var filterValue = r.stage === 'Deal created' ? 'deal' : 'won';
+          var clickable = Object.keys(r.value || {}).length > 0 ? ' as-clickable-row' : '';
+          return (
+            '<div class="as-funnel-value-card' + clickable + '" data-filter-by="funnel" data-filter-value="' + esc(filterValue) + '" data-filter-label="' + esc(r.stage) + '">' +
+            '<div class="as-funnel-value-label">' + esc(r.stage) + '</div>' +
+            '<div class="as-funnel-value-amount">' + esc(formatted) + '</div>' +
+            '</div>'
+          );
+        })
+        .join('') +
+      '</div>';
     container.querySelectorAll('[data-filter-by]').forEach(function (row) {
       if (!row.classList.contains('as-clickable-row')) return;
       row.addEventListener('click', function () {
@@ -444,21 +496,19 @@
     source: { rows: [], sortMode: 'volume' },
     campaign: { rows: [], sortMode: 'volume' },
   };
-  var MIN_SAMPLE_FOR_RATE_SORT = 3;
+  var LOW_SAMPLE_THRESHOLD = 3; // below this, the rate is flagged as low-sample rather than hidden — see sortConversionRows' doc comment for why
 
   function sortConversionRows(rows, sortMode) {
     if (sortMode === 'volume') return rows.slice().sort(function (a, b) { return b.total - a.total; });
-    // Rate sort: only rows with enough sample size compete for the top
-    // spots — otherwise a single lead that happened to convert would
-    // show as "100%" and outrank a source with real, larger-sample
-    // performance. Below-threshold rows are still shown, just pushed
-    // to the bottom (sorted by volume among themselves) rather than
-    // hidden entirely.
-    var eligible = rows.filter(function (r) { return r.total >= MIN_SAMPLE_FOR_RATE_SORT; });
-    var ineligible = rows.filter(function (r) { return r.total < MIN_SAMPLE_FOR_RATE_SORT; });
-    eligible.sort(function (a, b) { return b.rate - a.rate; });
-    ineligible.sort(function (a, b) { return b.total - a.total; });
-    return eligible.concat(ineligible);
+    // Rate sort now ranks EVERY row by rate, including low-sample ones
+    // — a small/new account (like a client's first few weeks) might
+    // only have 1-2 prospects per source, and excluding those from the
+    // ranking entirely made the toggle look like it did nothing (every
+    // row was below the old threshold, so Rate and Volume produced the
+    // same order). Low-sample rows are instead visually flagged (see
+    // renderConversionTable's isLowSample) so the number isn't
+    // over-trusted, without hiding it from the ranking altogether.
+    return rows.slice().sort(function (a, b) { return b.rate - a.rate; });
   }
 
   var CURRENCY_SYMBOLS = { GBP: '£', USD: '$', EUR: '€' };
@@ -479,6 +529,11 @@
     return rounded + (rounded === 1 ? ' day' : ' days');
   }
 
+  function formatTouchpointsToWon(avgTouchpoints) {
+    if (avgTouchpoints === null || avgTouchpoints === undefined) return '—';
+    return (Math.round(avgTouchpoints * 10) / 10).toString();
+  }
+
   function renderConversionTable(container, rows, keyName, emptyMessage) {
     conversionTableState[keyName].rows = rows;
     var sortMode = conversionTableState[keyName].sortMode;
@@ -494,19 +549,21 @@
       '<div class="as-sort-toggle">' +
       '<span class="as-sort-toggle-label">Sort by:</span>' +
       '<button type="button" class="as-sort-btn' + (sortMode === 'volume' ? ' as-sort-btn-active' : '') + '" data-sort="volume">Volume</button>' +
-      '<button type="button" class="as-sort-btn' + (sortMode === 'rate' ? ' as-sort-btn-active' : '') + '" data-sort="rate" title="Sources/campaigns with fewer than ' + MIN_SAMPLE_FOR_RATE_SORT + ' prospects are excluded from the top ranking, to avoid a single lucky conversion looking like 100%">Rate</button>' +
+      '<button type="button" class="as-sort-btn' + (sortMode === 'rate' ? ' as-sort-btn-active' : '') + '" data-sort="rate" title="Rows with fewer than ' + LOW_SAMPLE_THRESHOLD + ' prospects are marked with * — their rate is real but based on very little data, so worth reading cautiously.">Rate</button>' +
       '</div>';
 
     container.innerHTML =
       toggleHtml +
       '<table class="as-table as-conversion-table"><thead><tr><th>' +
       label +
-      '</th><th>Prospects</th><th>Converted to Deal</th><th>Rate</th><th>Won revenue</th><th>Avg. days to convert</th></tr></thead><tbody>' +
+      '</th><th>Prospects</th><th>Converted to Deal</th><th>Rate</th><th>Won revenue</th><th>Avg. days to convert</th><th>Avg. touchpoints to won</th></tr></thead><tbody>' +
       sortedRows
         .map(function (r) {
           var pct = Math.round(r.rate * 100);
           var rateClass = r.rate >= 0.2 ? ' as-rate-good' : '';
           var value = r[keyName];
+          var lowSample = r.total < LOW_SAMPLE_THRESHOLD;
+          var rateLabel = pct + '%' + (lowSample ? ' <span title="Based on only ' + r.total + ' prospect' + (r.total === 1 ? '' : 's') + ' — treat with caution">*</span>' : '');
           return (
             '<tr class="as-clickable-row" data-filter-by="' + keyName + '" data-filter-value="' + esc(value) + '" data-filter-label="' + esc(label) + ': ' + esc(value) + '"><td>' +
             esc(value) +
@@ -517,11 +574,13 @@
             '</td><td class="as-rate-cell' +
             rateClass +
             '">' +
-            pct +
-            '%</td><td>' +
+            rateLabel +
+            '</td><td>' +
             esc(formatRevenue(r.wonRevenue)) +
             '</td><td>' +
             esc(formatDaysToConvert(r.avgDaysToConvert)) +
+            '</td><td>' +
+            esc(formatTouchpointsToWon(r.avgTouchpointsToWon)) +
             '</td></tr>'
           );
         })
@@ -729,6 +788,18 @@
     { key: 'campaign', label: 'Campaign', render: function (r) { return cellOrDash(r.firstTouchCampaign); } },
     { key: 'term', label: 'Term', render: function (r) { return cellOrDash(r.firstTouchTerm); } },
     { key: 'content', label: 'Content', render: function (r) { return cellOrDash(r.firstTouchContent); } },
+    { key: 'gclid', label: 'GCLID', render: function (r) { return cellOrDash(r.firstTouchGclid); } },
+    { key: 'fbclid', label: 'FBCLID', render: function (r) { return cellOrDash(r.firstTouchFbclid); } },
+    {
+      key: 'dealValue',
+      label: 'Deal value',
+      headerTitle: 'Deal value at the moment it was marked Won in Pipedrive — blank until (and unless) that happens',
+      render: function (r) {
+        if (r.dealValue === null || r.dealValue === undefined) return '<span class="as-pd-none">—</span>';
+        var symbol = CURRENCY_SYMBOLS[r.dealCurrency] || (r.dealCurrency ? r.dealCurrency + ' ' : '');
+        return esc(symbol + Math.round(r.dealValue).toLocaleString());
+      },
+    },
     {
       key: 'referrer',
       label: 'Referrer',
@@ -1257,7 +1328,7 @@
     document.getElementById('utm-filter-clear').style.display = qs ? 'inline-block' : 'none';
     updateCsvExportLink();
 
-    renderFunnel(document.getElementById('funnel'), s.funnel);
+    renderFunnel(s.funnel, s.funnelValue);
     renderDailyChart(document.getElementById('daily-chart'), s.touchpointsByDay);
     renderBars(document.getElementById('first-touch-bars'), s.firstTouchChannelCounts);
     renderBars(document.getElementById('last-touch-bars'), s.lastTouchChannelCounts);
@@ -1416,6 +1487,19 @@
   document.getElementById('prospect-modal-show-anonymous-toggle').addEventListener('change', function (event) {
     setShowAnonymous(event.target.checked);
     renderModal(lastModalRows);
+  });
+
+  document.getElementById('funnel-mode-count').addEventListener('click', function () {
+    funnelMode = 'count';
+    document.getElementById('funnel-mode-count').classList.add('as-sort-btn-active');
+    document.getElementById('funnel-mode-value').classList.remove('as-sort-btn-active');
+    renderFunnel(lastFunnelCounts, lastFunnelValue);
+  });
+  document.getElementById('funnel-mode-value').addEventListener('click', function () {
+    funnelMode = 'value';
+    document.getElementById('funnel-mode-value').classList.add('as-sort-btn-active');
+    document.getElementById('funnel-mode-count').classList.remove('as-sort-btn-active');
+    renderFunnel(lastFunnelCounts, lastFunnelValue);
   });
 
   var modalColumnsPanelRendered = false;

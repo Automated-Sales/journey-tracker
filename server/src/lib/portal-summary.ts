@@ -53,6 +53,12 @@ export interface SourceConversion {
   // sources can convert at the same rate but close at very different
   // speeds.
   avgDaysToConvert: number | null;
+  // Average total touchpoint count (whole journey, not just before Deal
+  // creation) across identities in this group who've reached Won —
+  // null if nobody's won yet. Answers "how much nurturing does it
+  // typically take for this source to produce a Won deal," a different
+  // question from avgDaysToConvert's "how long does it take."
+  avgTouchpointsToWon: number | null;
 }
 
 export interface CampaignPerformance {
@@ -62,6 +68,7 @@ export interface CampaignPerformance {
   rate: number;
   wonRevenue: RevenueByCurrency;
   avgDaysToConvert: number | null;
+  avgTouchpointsToWon: number | null;
 }
 
 // One entry per funnel stage, in order — deliberately an array rather
@@ -199,6 +206,13 @@ export interface RecentProspect {
   firstTouchCampaign: string | null;
   firstTouchTerm: string | null;
   firstTouchContent: string | null;
+  firstTouchGclid: string | null;
+  firstTouchFbclid: string | null;
+  // Deal value/currency — see db.ts's Identity interface doc comment on
+  // dealValue for why this is captured at WON time specifically, not
+  // an earlier estimate. Both null until (and unless) a Deal is won.
+  dealValue: number | null;
+  dealCurrency: string | null;
   // Deal-lifecycle milestones — how much engagement happened before this
   // contact became a Deal, and before that Deal was Won. Straight
   // pass-throughs of the Identity row (see db.ts's Identity interface and
@@ -229,6 +243,14 @@ export interface PortalSummary {
   conversionBySource: SourceConversion[];
   campaignPerformance: CampaignPerformance[];
   funnel: FunnelStage[];
+  // A parallel, £/$/€ view of just the two funnel stages where a real
+  // monetary figure exists — "Total tracked"/"Identified"/"Lead
+  // created" have no value concept in this data model, so they're
+  // intentionally absent here rather than shown as a misleading "£0".
+  // See db.ts's dealValueAtCreate doc comment for why "Deal created"
+  // and "Won" use two DIFFERENT captured values, not the same number
+  // twice.
+  funnelValue: { stage: "Deal created" | "Won"; value: RevenueByCurrency }[];
   touchpointsByDay: TouchpointsByDay[];
   conversionTrend: ConversionTrendWeek[];
   distinctUtmValues: DistinctUtmValues;
@@ -258,7 +280,8 @@ function toSourceConversions(
   totals: Map<string, number>,
   converted: Map<string, number>,
   revenue: Map<string, Map<string, number>>,
-  daysToConvert: Map<string, number[]>
+  daysToConvert: Map<string, number[]>,
+  touchpointsToWon: Map<string, number[]>
 ): SourceConversion[] {
   return Array.from(totals.entries())
     .map(([source, total]) => {
@@ -270,6 +293,7 @@ function toSourceConversions(
         rate: total > 0 ? won / total : 0,
         wonRevenue: revenueMapToObject(revenue.get(source)),
         avgDaysToConvert: averageOf(daysToConvert.get(source)),
+        avgTouchpointsToWon: averageOf(touchpointsToWon.get(source)),
       };
     })
     .sort((a, b) => b.total - a.total);
@@ -279,7 +303,8 @@ function toCampaignPerformance(
   totals: Map<string, number>,
   converted: Map<string, number>,
   revenue: Map<string, Map<string, number>>,
-  daysToConvert: Map<string, number[]>
+  daysToConvert: Map<string, number[]>,
+  touchpointsToWon: Map<string, number[]>
 ): CampaignPerformance[] {
   return Array.from(totals.entries())
     .map(([campaign, total]) => {
@@ -291,6 +316,7 @@ function toCampaignPerformance(
         rate: total > 0 ? won / total : 0,
         wonRevenue: revenueMapToObject(revenue.get(campaign)),
         avgDaysToConvert: averageOf(daysToConvert.get(campaign)),
+        avgTouchpointsToWon: averageOf(touchpointsToWon.get(campaign)),
       };
     })
     .sort((a, b) => b.total - a.total);
@@ -334,6 +360,10 @@ function toRecentProspect(identity: Identity, summary: ReturnType<typeof buildAt
     firstTouchCampaign: summary!.firstTouchCampaign,
     firstTouchTerm: summary!.firstTouchTerm,
     firstTouchContent: summary!.firstTouchContent,
+    firstTouchGclid: summary!.firstTouchGclid,
+    firstTouchFbclid: summary!.firstTouchFbclid,
+    dealValue: identity.dealValue,
+    dealCurrency: identity.dealCurrency,
     leadToDealTouchpoints: identity.leadToDealTouchpoints,
     dealToWonTouchpoints: identity.dealToWonTouchpoints,
     pipedrivePersonId: identity.pipedrivePersonId,
@@ -499,9 +529,13 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
   const campaignRevenue = new Map<string, Map<string, number>>();
   const sourceDaysToConvert = new Map<string, number[]>();
   const campaignDaysToConvert = new Map<string, number[]>();
+  const sourceTouchpointsToWon = new Map<string, number[]>();
+  const campaignTouchpointsToWon = new Map<string, number[]>();
   let leadCreatedCount = 0;
   let dealCreatedCount = 0;
   let wonCount = 0;
+  const dealCreatedValueByCurrency = new Map<string, number>();
+  const wonValueByCurrency = new Map<string, number>();
   // Tracks the population actually included below — equals
   // identities.length only when utmFilter is empty (backward-compatible
   // with every existing "Total tracked"/totalIdentities behavior); once
@@ -538,6 +572,15 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
     if (identity.leadCreatedAt) leadCreatedCount++;
     if (identity.dealCreatedDealId !== null) dealCreatedCount++;
     if (identity.wonDealId !== null) wonCount++;
+    if (identity.dealCreatedDealId !== null && identity.dealValueAtCreate !== null && identity.dealCurrencyAtCreate) {
+      dealCreatedValueByCurrency.set(
+        identity.dealCurrencyAtCreate,
+        (dealCreatedValueByCurrency.get(identity.dealCurrencyAtCreate) ?? 0) + identity.dealValueAtCreate
+      );
+    }
+    if (identity.wonDealId !== null && identity.dealValue !== null && identity.dealCurrency) {
+      wonValueByCurrency.set(identity.dealCurrency, (wonValueByCurrency.get(identity.dealCurrency) ?? 0) + identity.dealValue);
+    }
 
     firstCounts.set(summary.firstTouchChannel, (firstCounts.get(summary.firstTouchChannel) ?? 0) + 1);
     lastCounts.set(summary.lastTouchChannel, (lastCounts.get(summary.lastTouchChannel) ?? 0) + 1);
@@ -586,6 +629,20 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
         const campaignDays = campaignDaysToConvert.get(summary.firstTouchCampaign) ?? [];
         campaignDays.push(days);
         campaignDaysToConvert.set(summary.firstTouchCampaign, campaignDays);
+      }
+    }
+
+    // Touchpoints-to-won — the identity's full touchpoint count (whole
+    // journey, not just up to Deal creation) as of now, one sample per
+    // WON identity.
+    if (identity.wonDealId !== null) {
+      const sourceTps = sourceTouchpointsToWon.get(summary.firstTouchSource) ?? [];
+      sourceTps.push(summary.touchpointCount);
+      sourceTouchpointsToWon.set(summary.firstTouchSource, sourceTps);
+      if (summary.firstTouchCampaign) {
+        const campaignTps = campaignTouchpointsToWon.get(summary.firstTouchCampaign) ?? [];
+        campaignTps.push(summary.touchpointCount);
+        campaignTouchpointsToWon.set(summary.firstTouchCampaign, campaignTps);
       }
     }
 
@@ -646,17 +703,24 @@ export function buildPortalSummary(identities: Identity[], touchpoints: Touchpoi
       .sort((a, b) => b.count - a.count)
       .slice(0, 10),
     recent: recent.slice(0, 25),
-    conversionBySource: toSourceConversions(sourceTotals, sourceConverted, sourceRevenue, sourceDaysToConvert).slice(0, 15),
-    campaignPerformance: toCampaignPerformance(campaignTotals, campaignConverted, campaignRevenue, campaignDaysToConvert).slice(
-      0,
-      15
-    ),
+    conversionBySource: toSourceConversions(sourceTotals, sourceConverted, sourceRevenue, sourceDaysToConvert, sourceTouchpointsToWon).slice(0, 15),
+    campaignPerformance: toCampaignPerformance(
+      campaignTotals,
+      campaignConverted,
+      campaignRevenue,
+      campaignDaysToConvert,
+      campaignTouchpointsToWon
+    ).slice(0, 15),
     funnel: [
       { stage: "Total tracked", count: filterActive ? matchedCount : identities.length },
       { stage: "Identified", count: filterActive ? matchedIdentifiedCount : identities.filter((i) => i.email).length },
       { stage: "Lead created", count: leadCreatedCount },
       { stage: "Deal created", count: dealCreatedCount },
       { stage: "Won", count: wonCount },
+    ],
+    funnelValue: [
+      { stage: "Deal created", value: revenueMapToObject(dealCreatedValueByCurrency) },
+      { stage: "Won", value: revenueMapToObject(wonValueByCurrency) },
     ],
     touchpointsByDay,
     conversionTrend: Array.from(trendWeeks.entries())

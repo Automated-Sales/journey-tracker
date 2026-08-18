@@ -77,6 +77,8 @@ function fixtureIdentity(overrides: Partial<Identity>): Identity {
     dealWonAt: null,
     dealValue: null,
     dealCurrency: null,
+    dealValueAtCreate: null,
+    dealCurrencyAtCreate: null,
     ...overrides,
   };
 }
@@ -256,6 +258,8 @@ async function main() {
     lastSeenAt: new Date("2026-01-11"),
     dealCreatedDealId: 501,
     dealCreatedAt: new Date("2026-01-11"),
+    dealValueAtCreate: 4500,
+    dealCurrencyAtCreate: "GBP",
     wonDealId: 501,
     dealValue: 5000,
     dealCurrency: "GBP",
@@ -264,10 +268,19 @@ async function main() {
   const linkedinRow = revenueSummary.conversionBySource.find((c) => c.source === "linkedin_ads");
   assert(linkedinRow?.wonRevenue.GBP === 5000, "conversionBySource: wonRevenue is keyed by currency and only counts WON deals with a captured value");
   assert(linkedinRow?.avgDaysToConvert === 10, "conversionBySource: avgDaysToConvert is the gap between first touch (Jan 1) and dealCreatedAt (Jan 11) — exactly 10 days");
+  assert(linkedinRow?.avgTouchpointsToWon === 3, "conversionBySource: avgTouchpointsToWon uses the identity's full touchpoint count as of now (idA has 3 touchpoints in the shared tps fixture) — only counted for WON identities");
   const mailchimpRow = revenueSummary.conversionBySource.find((c) => c.source === "mailchimp");
   assert(
-    Object.keys(mailchimpRow?.wonRevenue ?? { x: 1 }).length === 0 && mailchimpRow?.avgDaysToConvert === null,
-    "conversionBySource: a source with no converted identities shows empty wonRevenue and null avgDaysToConvert, not 0 or NaN"
+    Object.keys(mailchimpRow?.wonRevenue ?? { x: 1 }).length === 0 && mailchimpRow?.avgDaysToConvert === null && mailchimpRow?.avgTouchpointsToWon === null,
+    "conversionBySource: a source with no converted/won identities shows empty wonRevenue and null avgDaysToConvert/avgTouchpointsToWon, not 0 or NaN"
+  );
+  assert(
+    revenueSummary.funnelValue.find((f) => f.stage === "Deal created")?.value.GBP === 4500,
+    "funnelValue: 'Deal created' uses dealValueAtCreate (the early estimate, 4500) — a DIFFERENT number from the eventual Won value (5000), proving the two are tracked separately, not overwritten"
+  );
+  assert(
+    revenueSummary.funnelValue.find((f) => f.stage === "Won")?.value.GBP === 5000,
+    "funnelValue: 'Won' uses dealValue (the actual closed figure, 5000), not dealValueAtCreate's earlier estimate"
   );
 
   // --- conversionTrend -----------------------------------------------------
