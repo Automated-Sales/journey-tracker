@@ -81,6 +81,8 @@ function fixtureIdentity(overrides: Partial<Identity>): Identity {
     dealValueAtCreate: null,
     dealCurrencyAtCreate: null,
     segmentValue: null,
+    dealCurrentStageId: null,
+    dealCurrentStageName: null,
     ...overrides,
   };
 }
@@ -344,6 +346,30 @@ async function main() {
   assert(
     assistSummary.assistedConversions.every((a) => a.channel !== "Email click" || a.wonRate === 1),
     "assistedConversions: wonRate is relative to total WON identities (1), not total identities (2) — idB never converted, so it shouldn't dilute the denominator"
+  );
+
+  // --- dealStageBySource ("where do leads get stuck?") -------------------
+  const openDealIdentity = fixtureIdentity({
+    id: "idA",
+    email: "a@example.com",
+    dealCreatedDealId: 950,
+    dealCurrentStageId: 20,
+    dealCurrentStageName: "Negotiation",
+  });
+  const wonWithStageIdentity = fixtureIdentity({
+    id: "idB",
+    email: "b@example.com",
+    dealCreatedDealId: 951,
+    wonDealId: 951,
+    dealCurrentStageId: 20,
+    dealCurrentStageName: "Negotiation", // pre-win stage — should NOT count, since idB already exited the pipeline
+  });
+  const noStageYetIdentity = fixtureIdentity({ id: "idC", email: "c@example.com", dealCreatedDealId: 952 }); // has a Deal but no stage-change webhook has fired yet
+  const stageSummary = buildPortalSummary([openDealIdentity, wonWithStageIdentity, noStageYetIdentity], tps);
+  const linkedinStageRow = stageSummary.dealStageBySource.find((r) => r.source === "linkedin_ads");
+  assert(
+    linkedinStageRow?.stages.length === 1 && linkedinStageRow?.stages[0].stageName === "Negotiation" && linkedinStageRow?.stages[0].count === 1,
+    "dealStageBySource: only idA (OPEN deal, has a current stage) counts — idB is excluded because it's already Won, idC excluded because it has no stage captured yet"
   );
 
   const recentTp = fixtureTouchpoint({ identityId: "idA", channel: "website_visit", occurredAt: new Date() });

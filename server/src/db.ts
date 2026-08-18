@@ -165,6 +165,8 @@ async function init() {
   ensureColumn("identities", "dealValueAtCreate", "REAL");
   ensureColumn("identities", "dealCurrencyAtCreate", "TEXT");
   ensureColumn("identities", "segmentValue", "TEXT");
+  ensureColumn("identities", "dealCurrentStageId", "INTEGER");
+  ensureColumn("identities", "dealCurrentStageName", "TEXT");
   // Added when Lead-level (pre-Deal-conversion) attribution sync was
   // built — see pipedrive-sync.ts's syncLeadAttribution and
   // webhooks.ts's "lead" entity handler. Any tenant row created before
@@ -218,6 +220,7 @@ async function init() {
   ensureColumn("tenants", "segmentFieldKey", "TEXT");
   ensureColumn("tenants", "segmentFieldLabel", "TEXT");
   ensureColumn("tenants", "segmentFieldOptions", "TEXT");
+  ensureColumn("tenants", "stageNameMap", "TEXT");
 
   persist();
 }
@@ -314,6 +317,15 @@ export interface Tenant {
   segmentFieldKey: string | null;
   segmentFieldLabel: string | null;
   segmentFieldOptions: string | null;
+  // Self-healing cache (id -> name) for the "Deal stage by source"
+  // report — unlike segmentFieldOptions above, there's no setting for
+  // this to attach a "re-fetch on save" moment to (a tenant doesn't
+  // pick "which" pipeline stages to use, they just have whatever
+  // Pipedrive has). Instead, webhooks.ts's deal handler checks this map
+  // on every stage-change event and refreshes it automatically whenever
+  // it encounters a stage_id not already in it — self-correcting for a
+  // renamed or newly-added stage without needing any manual action.
+  stageNameMap: string | null;
 }
 
 export interface Session {
@@ -388,6 +400,19 @@ export interface Identity {
   // rename of the option in Pipedrive doesn't require re-syncing every
   // identity that already captured it.
   segmentValue: string | null;
+  // Powers "Deal stage by source" — the CURRENT (not frozen) stage of
+  // this identity's Deal, updated on every real stage-change webhook
+  // (see webhooks.ts's deal handler, same place that already logs a
+  // pipedrive_stage_change touchpoint). dealCurrentStageId is the raw
+  // Pipedrive stage_id; dealCurrentStageName is resolved via
+  // tenant.stageNameMap at capture time (unlike segmentValue, which
+  // resolves lazily at display time — stage names change rarely enough
+  // that resolving once and storing it is simpler here, and this way
+  // the report doesn't need touchpoint metadata parsing to know "where
+  // is this deal right now"). Both null until this identity's Deal has
+  // moved through at least one real stage transition.
+  dealCurrentStageId: number | null;
+  dealCurrentStageName: string | null;
 }
 
 // The single, shared definition of "not anonymous" — used by the
@@ -482,6 +507,7 @@ function rowToTenant(row: any): Tenant | null {
     segmentFieldKey: row.segmentFieldKey ?? null,
     segmentFieldLabel: row.segmentFieldLabel ?? null,
     segmentFieldOptions: row.segmentFieldOptions ?? null,
+    stageNameMap: row.stageNameMap ?? null,
   };
 }
 
@@ -513,6 +539,8 @@ function rowToIdentity(row: any): Identity | null {
       typeof row.dealValueAtCreate === "number" ? row.dealValueAtCreate : row.dealValueAtCreate ? Number(row.dealValueAtCreate) : null,
     dealCurrencyAtCreate: row.dealCurrencyAtCreate ?? null,
     segmentValue: row.segmentValue ?? null,
+    dealCurrentStageId: row.dealCurrentStageId ?? null,
+    dealCurrentStageName: row.dealCurrentStageName ?? null,
   };
 }
 
@@ -730,6 +758,18 @@ export const db = {
           data.segmentFieldOptions,
           id,
         ]);
+        persist();
+      });
+    },
+
+    // Called from webhooks.ts's deal handler whenever it encounters a
+    // stage_id not already in the cached map — see Tenant.stageNameMap's
+    // doc comment for the self-healing design.
+    updateStageNameMap(id: string, stageNameMap: string) {
+      return withDb(() => {
+        const existing = queryOne("SELECT * FROM tenants WHERE id = ?", [id]);
+        if (!existing) throw new Error(`Tenant ${id} not found`);
+        sqlite.run("UPDATE tenants SET stageNameMap = ? WHERE id = ?", [stageNameMap, id]);
         persist();
       });
     },
@@ -957,6 +997,32 @@ export const db = {
         sqlite.run(`UPDATE identities SET segmentValue = ? WHERE tenantId = ? AND id = ?`, [segmentValue, where.tenantId, where.id]);
         persist();
         return rowToIdentity({ ...existing, segmentValue })!;
+      });
+    },
+
+    // Same "always current, not frozen" reasoning as setSegmentValue
+    // above — called from webhooks.ts's deal handler on every genuine
+    // stage transition.
+    setDealCurrentStage({
+      where,
+      dealCurrentStageId,
+      dealCurrentStageName,
+    }: {
+      where: { tenantId: string; id: string };
+      dealCurrentStageId: number;
+      dealCurrentStageName: string;
+    }) {
+      return withDb(() => {
+        const existing = queryOne("SELECT * FROM identities WHERE tenantId = ? AND id = ?", [where.tenantId, where.id]);
+        if (!existing) throw new Error(`Identity ${where.id} not found for tenant ${where.tenantId}`);
+        sqlite.run(`UPDATE identities SET dealCurrentStageId = ?, dealCurrentStageName = ? WHERE tenantId = ? AND id = ?`, [
+          dealCurrentStageId,
+          dealCurrentStageName,
+          where.tenantId,
+          where.id,
+        ]);
+        persist();
+        return rowToIdentity({ ...existing, dealCurrentStageId, dealCurrentStageName })!;
       });
     },
 

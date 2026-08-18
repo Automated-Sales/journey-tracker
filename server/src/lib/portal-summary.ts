@@ -332,6 +332,14 @@ export interface PortalSummary {
   // channel present anywhere," so rows don't sum to 100% (a single Won
   // deal's journey can touch several channels, each counted).
   assistedConversions: { channel: string; wonCount: number; wonRate: number }[];
+  // "Where do leads from each source get stuck?" — only identities with
+  // a currently-OPEN Deal (has one, not yet Won) count here, bucketed
+  // by their Deal's CURRENT stage (see db.ts's Identity.dealCurrentStageId
+  // doc comment). Deliberately doesn't include a "Lost" bucket — this
+  // app doesn't capture Lost status anywhere yet (webhooks.ts's deal
+  // handler only has a "won" branch), a known gap rather than an
+  // oversight here specifically.
+  dealStageBySource: { source: string; stages: { stageName: string; count: number }[] }[];
   distinctUtmValues: DistinctUtmValues;
 }
 
@@ -676,6 +684,7 @@ export function buildPortalSummary(
   const segmentTouchpointsToWon = new Map<string, number[]>();
   const assistedConversionCounts = new Map<string, number>(); // channel label -> how many WON identities had it appear anywhere in their journey
   let totalWonForAssists = 0;
+  const stageBySourceCounts = new Map<string, Map<string, number>>(); // firstTouchSource -> stageName -> count of OPEN deals currently in that stage
   let leadCreatedCount = 0;
   let dealCreatedCount = 0;
   let wonCount = 0;
@@ -834,6 +843,16 @@ export function buildPortalSummary(
       }
     }
 
+    // Deal stage by source — "where do leads from each source get
+    // stuck?" Only OPEN deals count (has one, not yet Won) — a Won
+    // identity has exited the pipeline, so bucketing it under its
+    // pre-win stage would misrepresent where things currently stand.
+    if (identity.dealCreatedDealId !== null && identity.wonDealId === null && identity.dealCurrentStageName) {
+      const bySource = stageBySourceCounts.get(summary.firstTouchSource) ?? new Map<string, number>();
+      bySource.set(identity.dealCurrentStageName, (bySource.get(identity.dealCurrentStageName) ?? 0) + 1);
+      stageBySourceCounts.set(summary.firstTouchSource, bySource);
+    }
+
     // Conversion trend — which week bucket this identity's first touch
     // falls into, using CURRENT converted state (see
     // ConversionTrendWeek's doc comment on why that's an intentional,
@@ -930,6 +949,18 @@ export function buildPortalSummary(
     assistedConversions: Array.from(assistedConversionCounts.entries())
       .map(([channel, wonCount]) => ({ channel, wonCount, wonRate: totalWonForAssists > 0 ? wonCount / totalWonForAssists : 0 }))
       .sort((a, b) => b.wonCount - a.wonCount),
+    dealStageBySource: Array.from(stageBySourceCounts.entries())
+      .map(([source, stages]) => ({
+        source,
+        stages: Array.from(stages.entries())
+          .map(([stageName, count]) => ({ stageName, count }))
+          .sort((a, b) => b.count - a.count),
+      }))
+      .sort((a, b) => {
+        const totalA = a.stages.reduce((sum, s) => sum + s.count, 0);
+        const totalB = b.stages.reduce((sum, s) => sum + s.count, 0);
+        return totalB - totalA;
+      }),
     distinctUtmValues,
   };
 }

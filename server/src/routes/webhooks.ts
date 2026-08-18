@@ -3,7 +3,7 @@ import { db, Tenant, Identity } from "../db";
 import { recordTouchpoint, mergeIdentities } from "../lib/identity";
 import { freezeDealAttribution, syncPersonAttribution, freezeLeadAttribution, syncDealMilestoneField } from "../lib/pipedrive-sync";
 import { requireTenant, requireTenantSecret } from "./tenant-middleware";
-import { getDeal, getPerson } from "../lib/pipedrive";
+import { getDeal, getPerson, listStages } from "../lib/pipedrive";
 import { countTouchpointsUpTo, countTouchpointsBetween } from "../lib/deal-milestones";
 
 export const webhooksRouter = Router({ mergeParams: true });
@@ -250,6 +250,95 @@ async function captureSegmentValue(tenant: Tenant, identity: Identity, data: any
 }
 
 /**
+ * Per-tenant configured fallback source (see db.ts's Tenant interface
+ * doc comment on leadSourceFieldKey) — ONLY applied when this identity
+ * has zero touchpoints of any kind, i.e. our own tracking never saw
+ * this person at all. Real tracked data — even a single anonymous ad
+ * click or page view — always wins; this never overrides or competes
+ * with it.
+ *
+ * Called from BOTH the Lead handler AND the Deal "created" handler
+ * below — originally this only ran on Lead creation, but plenty of
+ * Pipedrive workflows create Deals directly without ever going through
+ * the Leads Inbox at all, meaning the fallback never got a chance to
+ * fire for them; the first (and only) touchpoint such a contact ever
+ * got was a generic "pipedrive_stage_change" one once their Deal
+ * started moving, which is a real event but not a SOURCE — it says
+ * nothing about where the contact originally came from, unlike this
+ * fallback field. Safe to call from both: Leads and Deals share the
+ * same custom-field structure in Pipedrive, so the same configured
+ * field key resolves correctly off either payload, and the "zero
+ * touchpoints so far" guard means whichever event happens to arrive
+ * first is the one that gets to apply it — a Lead created before its
+ * Deal still gets first crack, same behavior as before this change.
+ */
+async function applyLeadSourceFallback(tenant: Tenant, identity: Identity, data: any, occurredAt: Date): Promise<void> {
+  if (!tenant.leadSourceFieldKey) return;
+  const existingTouchpoints = await db.touchpoint.findMany({
+    where: { tenantId: tenant.id, identityId: identity.id },
+  });
+  if (existingTouchpoints.length > 0) return;
+  const fieldValue = data[tenant.leadSourceFieldKey];
+  if (typeof fieldValue !== "string" || !fieldValue.trim()) return;
+  await db.touchpoint.create({
+    data: {
+      tenantId: tenant.id,
+      identityId: identity.id,
+      channel: "lead_source_field",
+      // The raw value as-is, whatever shape it happens to be for this
+      // tenant (a URL, a plain label, etc) — deliberately not
+      // parsed/reformatted, since its structure is entirely
+      // tenant-specific and unknown to us in general.
+      source: fieldValue.trim(),
+      title: `Lead source (${tenant.leadSourceFieldLabel || "configured field"}): ${fieldValue.trim()}`,
+      metadata: JSON.stringify({ leadSourceFieldKey: tenant.leadSourceFieldKey }),
+      occurredAt,
+    },
+  });
+  // Immediate backfill, same "push now rather than wait for the next
+  // unrelated event" pattern used elsewhere in this file — this
+  // identity's Person-level AS: fields would otherwise stay blank
+  // until some later, unrelated webhook happens to re-trigger a sync.
+  await syncPersonAttribution(tenant, identity).catch((err) =>
+    console.error(`[webhooks] syncPersonAttribution after lead-source-fallback failed for tenant ${tenant.id}:`, err)
+  );
+}
+
+/**
+ * Resolves a Pipedrive stage_id into its readable name for the "Deal
+ * stage by source" report — see db.ts's Tenant.stageNameMap doc comment
+ * for the self-healing cache design. Checks the cached map first (the
+ * common case, since a tenant's deals mostly cycle through the SAME
+ * small set of pipeline stages); only hits the live API when a
+ * genuinely unseen stage_id shows up, then persists the refreshed full
+ * map so future lookups for that stage are free.
+ */
+async function resolveStageName(tenant: Tenant, stageId: number): Promise<string | null> {
+  let map: Record<string, string> = {};
+  try {
+    map = tenant.stageNameMap ? JSON.parse(tenant.stageNameMap) : {};
+  } catch {
+    map = {};
+  }
+  if (map[String(stageId)]) return map[String(stageId)];
+  if (!tenant.pipedriveApiToken) return null;
+  try {
+    const stages = await listStages(tenant.pipedriveApiToken);
+    const freshMap: Record<string, string> = {};
+    for (const s of stages) freshMap[String(s.id)] = s.name;
+    await db.tenant.updateStageNameMap(tenant.id, JSON.stringify(freshMap));
+    // Keep the in-memory tenant object consistent for the rest of THIS
+    // request too, in case another stage_id needs resolving later in
+    // the same webhook handler run.
+    tenant.stageNameMap = JSON.stringify(freshMap);
+    return freshMap[String(stageId)] ?? null;
+  } catch (err) {
+    console.error(`[webhooks] resolveStageName failed to fetch stages for tenant ${tenant.id}:`, err);
+    return null;
+  }
+}
+
+/**
  * All touchpoints of one channel for an identity, most-recent first — the
  * shared building block for "has this specific Pipedrive event already
  * been logged" checks below (deal stage dedup, activity-completion
@@ -390,6 +479,14 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
                 occurredAt: new Date(),
               },
             });
+            const stageName = await resolveStageName(tenant, data.stage_id);
+            if (stageName) {
+              await db.identity.setDealCurrentStage({
+                where: { tenantId: tenant.id, id: identity.id },
+                dealCurrentStageId: data.stage_id,
+                dealCurrentStageName: stageName,
+              });
+            }
             void syncPersonAttribution(tenant, identity).catch((err) =>
               console.error(`[webhooks] syncPersonAttribution after deal touchpoint failed for tenant ${tenant.id}:`, err)
             );
@@ -405,6 +502,13 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
         // so we check both.
         if (data.id && ["added", "create", "created"].includes(String(action))) {
           const createdAt = data.add_time ? new Date(data.add_time) : new Date();
+          // Applied BEFORE the freeze below, so if this creates a
+          // fallback touchpoint (only happens when the identity has
+          // zero touchpoints so far), that touchpoint becomes what gets
+          // frozen as this Deal's first-touch source — not left stuck
+          // showing the next real event (often just a generic
+          // "pipedrive_stage_change") as if THAT were the origin.
+          await applyLeadSourceFallback(tenant, identity, data, createdAt);
           await freezeDealAttribution(tenant, { dealId: data.id, pipedrivePersonId: personId, dealCreatedAt: createdAt });
 
           // Same freeze, mirrored into our own DB (not just Pipedrive's
@@ -528,52 +632,7 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
         await captureSegmentValue(tenant, identity, data, "deal");
         if (!identity.leadCreatedAt) {
           const leadCreatedAt = data.add_time ? new Date(data.add_time) : new Date();
-
-          // Per-tenant configured fallback source (see db.ts's Tenant
-          // interface doc comment on leadSourceFieldKey) — ONLY applied
-          // when this identity has zero touchpoints of any kind, i.e.
-          // our own tracking never saw this person at all (a lead that
-          // came in through, say, a native Facebook Lead Form via a
-          // third-party tool, with no website visit). Real tracked data
-          // — even a single anonymous ad click or page view — always
-          // wins; this never overrides or competes with it. Custom
-          // field values arrive as flat top-level properties directly
-          // on the Lead webhook payload (same convention confirmed
-          // earlier for writing them back via updateLeadCustomFields),
-          // so no extra Pipedrive API call is needed to read this.
-          if (tenant.leadSourceFieldKey) {
-            const existingTouchpoints = await db.touchpoint.findMany({
-              where: { tenantId: tenant.id, identityId: identity.id },
-            });
-            if (existingTouchpoints.length === 0) {
-              const fieldValue = data[tenant.leadSourceFieldKey];
-              if (typeof fieldValue === "string" && fieldValue.trim()) {
-                await db.touchpoint.create({
-                  data: {
-                    tenantId: tenant.id,
-                    identityId: identity.id,
-                    channel: "lead_source_field",
-                    // The raw value as-is, whatever shape it happens to
-                    // be for this tenant (a URL, a plain label, etc) —
-                    // deliberately not parsed/reformatted, since its
-                    // structure is entirely tenant-specific and unknown
-                    // to us in general.
-                    source: fieldValue.trim(),
-                    title: `Lead source (${tenant.leadSourceFieldLabel || "configured field"}): ${fieldValue.trim()}`,
-                    metadata: JSON.stringify({ leadSourceFieldKey: tenant.leadSourceFieldKey }),
-                    occurredAt: leadCreatedAt,
-                  },
-                });
-                // Immediate backfill, same "push now rather than wait
-                // for the next unrelated event" pattern as the person
-                // handler above — this identity's Person-level AS:
-                // fields would otherwise stay blank until some later,
-                // unrelated webhook happens to re-trigger a sync.
-                await syncPersonAttribution(tenant, identity);
-              }
-            }
-          }
-
+          await applyLeadSourceFallback(tenant, identity, data, leadCreatedAt);
           await db.identity.setLeadMilestone({
             where: { tenantId: tenant.id, id: identity.id },
             data: { leadCreatedAt, leadCreatedLeadId: String(data.id) },

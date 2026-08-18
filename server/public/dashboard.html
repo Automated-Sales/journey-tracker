@@ -290,6 +290,12 @@
       <div id="assisted-conversions"></div>
     </div>
 
+    <div class="as-card" id="deal-stage-by-source-card" style="margin-bottom:20px; display:none;">
+      <p class="as-panel-title">Deal stage by source</p>
+      <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">Where do leads from each source currently sit in your pipeline? Only OPEN deals count — once a deal is Won it's left the pipeline, so it's excluded here rather than shown under its pre-win stage.</p>
+      <div id="deal-stage-by-source"></div>
+    </div>
+
     <div class="as-card">
       <div class="as-panel-head">
         <p class="as-panel-title">Recently active prospects</p>
@@ -636,6 +642,43 @@
         openProspectModal(row.getAttribute('data-filter-by'), row.getAttribute('data-filter-value'), row.getAttribute('data-filter-label'));
       });
     });
+  }
+
+  // A source × stage grid — rows are sources (already sorted by total
+  // open-deal count, largest first), columns are every distinct stage
+  // name seen across any source. Not clickable (unlike the conversion
+  // tables above) — a combined "this source AND this stage" drill-down
+  // would need a new filter dimension the popup doesn't support yet;
+  // left as a plain reference table for now rather than half-build that.
+  function renderDealStageBySource(container, rows) {
+    if (!rows.length) {
+      container.innerHTML = '<div class="as-empty">No open deals with a captured stage yet — this fills in as deals move through your pipeline.</div>';
+      return;
+    }
+    var allStages = [];
+    rows.forEach(function (r) {
+      r.stages.forEach(function (s) {
+        if (allStages.indexOf(s.stageName) === -1) allStages.push(s.stageName);
+      });
+    });
+
+    var theadHtml = '<tr><th>Source</th>' + allStages.map(function (s) { return '<th>' + esc(s) + '</th>'; }).join('') + '<th>Total</th></tr>';
+    var bodyHtml = rows
+      .map(function (r) {
+        var stageCounts = {};
+        r.stages.forEach(function (s) { stageCounts[s.stageName] = s.count; });
+        var total = r.stages.reduce(function (sum, s) { return sum + s.count; }, 0);
+        var cells = allStages
+          .map(function (stageName) {
+            var count = stageCounts[stageName] || 0;
+            return '<td' + (count === 0 ? ' style="color:#c7ccd3;"' : '') + '>' + (count || '—') + '</td>';
+          })
+          .join('');
+        return '<tr><td>' + esc(r.source) + '</td>' + cells + '<td style="font-weight:700;">' + total + '</td></tr>';
+      })
+      .join('');
+
+    container.innerHTML = '<div class="as-table-scroll"><table class="as-table as-conversion-table"><thead>' + theadHtml + '</thead><tbody>' + bodyHtml + '</tbody></table></div>';
   }
 
   function renderConversionTable(container, rows, keyName, emptyMessage, filterValueKey) {
@@ -1533,6 +1576,14 @@
       renderAssistedConversions(document.getElementById('assisted-conversions'), s.assistedConversions);
     } else {
       assistedCard.style.display = 'none';
+    }
+
+    var stageCard = document.getElementById('deal-stage-by-source-card');
+    if (s.dealStageBySource.length) {
+      stageCard.style.display = 'block';
+      renderDealStageBySource(document.getElementById('deal-stage-by-source'), s.dealStageBySource);
+    } else {
+      stageCard.style.display = 'none';
     }
 
     // Recently active prospects is deliberately NOT rendered from

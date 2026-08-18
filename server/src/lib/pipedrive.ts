@@ -195,6 +195,21 @@ export async function listLeadLabels(token: string): Promise<Array<{ id: string;
     .map((l: any) => ({ id: l.id, name: l.name }));
 }
 
+// Powers the "Deal stage by source" report — resolves the numeric
+// stage_id already captured on every pipedrive_stage_change touchpoint
+// (see webhooks.ts's deal handler) into a readable name. GET /stages
+// returns every stage across every pipeline the account has; the
+// tenant's own pipeline_id isn't filtered here since a stage_id is
+// already globally unique within an account, so no extra lookup is
+// needed to disambiguate.
+export async function listStages(token: string): Promise<Array<{ id: number; name: string }>> {
+  const json: any = await pdFetchV1(token, `/stages`);
+  const data = json.data ?? [];
+  return data
+    .filter((s: any) => typeof s.id === "number" && typeof s.name === "string")
+    .map((s: any) => ({ id: s.id, name: s.name }));
+}
+
 export async function createPersonField(
   token: string,
   name: string,
