@@ -29,6 +29,7 @@ function tp(partial: Partial<Touchpoint>): Touchpoint {
     gclid: null,
     fbclid: null,
     msclkid: null,
+    liFatId: null,
     referrer: null,
     url: null,
     title: null,

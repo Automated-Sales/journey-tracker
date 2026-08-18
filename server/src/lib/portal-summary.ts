@@ -1,5 +1,5 @@
 import { Identity, Touchpoint, isIdentified } from "../db";
-import { buildAttributionSummary } from "./attribution";
+import { buildAttributionSummary, CHANNEL_LABELS } from "./attribution";
 
 /**
  * Aggregates across every identity for a tenant — the thing the Pipedrive
@@ -64,6 +64,27 @@ export interface SourceConversion {
 export interface CampaignPerformance {
   campaign: string;
   total: number; // distinct identities whose first touch had this campaign — NOT the same count as topCampaigns above, which counts every touchpoint (so one prospect with 3 visits under the same campaign counts 3x there, 1x here). Kept as a separate field/panel rather than changing topCampaigns' existing meaning, since the CSV export and any saved links to it shouldn't silently change shape.
+  converted: number;
+  rate: number;
+  wonRevenue: RevenueByCurrency;
+  avgDaysToConvert: number | null;
+  avgTouchpointsToWon: number | null;
+}
+
+// Same shape as SourceConversion/CampaignPerformance, but grouped by the
+// tenant's configured segment field (see db.ts's Tenant.segmentFieldKey
+// doc comment — Johari's own is Pipedrive Label). Empty array for any
+// tenant that hasn't configured one, since no identity would have a
+// segmentValue to group by. An identity with a MULTI-select segment
+// value (e.g. two Labels) counts toward EACH of its segments' totals —
+// the standard convention for multi-category reporting (a Deal tagged
+// both "Villas" and "PPC" genuinely belongs in both groups), which does
+// mean the totals across all segment rows can sum to more than the
+// overall total tracked count. That's expected, not a bug.
+export interface SegmentPerformance {
+  segmentId: string;
+  segmentName: string;
+  total: number;
   converted: number;
   rate: number;
   wonRevenue: RevenueByCurrency;
@@ -289,6 +310,7 @@ export interface PortalSummary {
   recent: RecentProspect[];
   conversionBySource: SourceConversion[];
   campaignPerformance: CampaignPerformance[];
+  segmentPerformance: SegmentPerformance[];
   funnel: FunnelStage[];
   // A parallel, £/$/€ view of just the two funnel stages where a real
   // monetary figure exists — "Total tracked"/"Identified"/"Lead
@@ -300,6 +322,16 @@ export interface PortalSummary {
   funnelValue: { stage: "Deal created" | "Won"; value: RevenueByCurrency }[];
   touchpointsByDay: TouchpointsByDay[];
   conversionTrend: ConversionTrendWeek[];
+  // Multi-touch view: unlike everything else on this dashboard (all
+  // first-touch, by deliberate convention), this answers "which
+  // channels showed up ANYWHERE in a Won deal's journey" — surfacing
+  // assist channels (retargeting, email nurture) that never get credit
+  // as a first or last touch but may still have genuinely helped close
+  // the deal. One entry per channel that appeared in at least one Won
+  // journey; wonRate is "what fraction of ALL Won deals had this
+  // channel present anywhere," so rows don't sum to 100% (a single Won
+  // deal's journey can touch several channels, each counted).
+  assistedConversions: { channel: string; wonCount: number; wonRate: number }[];
   distinctUtmValues: DistinctUtmValues;
 }
 
@@ -369,6 +401,31 @@ function toCampaignPerformance(
     .sort((a, b) => b.total - a.total);
 }
 
+function toSegmentPerformance(
+  totals: Map<string, number>,
+  converted: Map<string, number>,
+  revenue: Map<string, Map<string, number>>,
+  daysToConvert: Map<string, number[]>,
+  touchpointsToWon: Map<string, number[]>,
+  segmentOptions?: { id: string; name: string }[]
+): SegmentPerformance[] {
+  return Array.from(totals.entries())
+    .map(([segmentId, total]) => {
+      const won = converted.get(segmentId) ?? 0;
+      return {
+        segmentId,
+        segmentName: resolveSegmentName(segmentId, segmentOptions),
+        total,
+        converted: won,
+        rate: total > 0 ? won / total : 0,
+        wonRevenue: revenueMapToObject(revenue.get(segmentId)),
+        avgDaysToConvert: averageOf(daysToConvert.get(segmentId)),
+        avgTouchpointsToWon: averageOf(touchpointsToWon.get(segmentId)),
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+}
+
 const TOUCHPOINTS_BY_DAY_WINDOW_DAYS = 30;
 const CONVERSION_TREND_WEEKS = 12;
 
@@ -433,7 +490,9 @@ function toRecentProspect(
 export type ProspectFilter =
   | { type: "funnel"; value: "total" | "identified" | "lead" | "deal" | "won" }
   | { type: "source"; value: string }
-  | { type: "campaign"; value: string };
+  | { type: "campaign"; value: string }
+  | { type: "segment"; value: string }
+  | { type: "assistedChannel"; value: string };
 
 // The actual matching logic, shared by filterProspects (JSON, for the
 // dashboard's popup) and filterIdentities (raw Identity rows, for the
@@ -484,6 +543,19 @@ function matchingIdentities(
 
     if (filter.type === "source" && summary.firstTouchSource !== filter.value) continue;
     if (filter.type === "campaign" && summary.firstTouchCampaign !== filter.value) continue;
+    if (filter.type === "segment") {
+      const values = (identity.segmentValue || "").split(",").map((v) => v.trim()).filter(Boolean);
+      if (!values.includes(filter.value)) continue;
+    }
+    if (filter.type === "assistedChannel") {
+      // Mirrors assistedConversions' own matching exactly — WON only,
+      // channel present ANYWHERE in the full journey (tps), not just
+      // first/last touch. See PortalSummary.assistedConversions' doc
+      // comment for the full reasoning.
+      if (identity.wonDealId === null) continue;
+      const hasChannel = tps.some((tp) => (CHANNEL_LABELS[tp.channel] || tp.channel) === filter.value);
+      if (!hasChannel) continue;
+    }
 
     results.push({ identity, summary });
   }
@@ -597,6 +669,13 @@ export function buildPortalSummary(
   const campaignDaysToConvert = new Map<string, number[]>();
   const sourceTouchpointsToWon = new Map<string, number[]>();
   const campaignTouchpointsToWon = new Map<string, number[]>();
+  const segmentTotals = new Map<string, number>();
+  const segmentConverted = new Map<string, number>();
+  const segmentRevenue = new Map<string, Map<string, number>>();
+  const segmentDaysToConvert = new Map<string, number[]>();
+  const segmentTouchpointsToWon = new Map<string, number[]>();
+  const assistedConversionCounts = new Map<string, number>(); // channel label -> how many WON identities had it appear anywhere in their journey
+  let totalWonForAssists = 0;
   let leadCreatedCount = 0;
   let dealCreatedCount = 0;
   let wonCount = 0;
@@ -712,6 +791,49 @@ export function buildPortalSummary(
       }
     }
 
+    // Conversion by segment — every metric above, repeated for EACH of
+    // this identity's segment IDs (comma-split, since a multi-select
+    // Label means one identity can belong to more than one segment).
+    if (identity.segmentValue) {
+      const segmentIds = identity.segmentValue.split(",").map((v) => v.trim()).filter(Boolean);
+      for (const segId of segmentIds) {
+        segmentTotals.set(segId, (segmentTotals.get(segId) ?? 0) + 1);
+        if (converted) segmentConverted.set(segId, (segmentConverted.get(segId) ?? 0) + 1);
+        if (identity.wonDealId !== null && identity.dealValue !== null && identity.dealCurrency) {
+          const bySegment = segmentRevenue.get(segId) ?? new Map<string, number>();
+          bySegment.set(identity.dealCurrency, (bySegment.get(identity.dealCurrency) ?? 0) + identity.dealValue);
+          segmentRevenue.set(segId, bySegment);
+        }
+        if (converted && identity.dealCreatedAt) {
+          const days = Math.max(
+            0,
+            (identity.dealCreatedAt.getTime() - new Date(summary.firstTouchDate).getTime()) / (24 * 60 * 60 * 1000)
+          );
+          const segDays = segmentDaysToConvert.get(segId) ?? [];
+          segDays.push(days);
+          segmentDaysToConvert.set(segId, segDays);
+        }
+        if (identity.wonDealId !== null) {
+          const segTps = segmentTouchpointsToWon.get(segId) ?? [];
+          segTps.push(summary.touchpointCount);
+          segmentTouchpointsToWon.set(segId, segTps);
+        }
+      }
+    }
+
+    // Multi-touch / assisted conversions — deliberately the ONE place
+    // on this dashboard that looks at every touchpoint in a Won
+    // identity's journey, not just first/last touch. See
+    // PortalSummary.assistedConversions' own doc comment for the full
+    // reasoning.
+    if (identity.wonDealId !== null) {
+      totalWonForAssists++;
+      const channelsInJourney = new Set(tps.map((tp) => CHANNEL_LABELS[tp.channel] || tp.channel));
+      for (const ch of channelsInJourney) {
+        assistedConversionCounts.set(ch, (assistedConversionCounts.get(ch) ?? 0) + 1);
+      }
+    }
+
     // Conversion trend — which week bucket this identity's first touch
     // falls into, using CURRENT converted state (see
     // ConversionTrendWeek's doc comment on why that's an intentional,
@@ -777,6 +899,14 @@ export function buildPortalSummary(
       campaignDaysToConvert,
       campaignTouchpointsToWon
     ).slice(0, 15),
+    segmentPerformance: toSegmentPerformance(
+      segmentTotals,
+      segmentConverted,
+      segmentRevenue,
+      segmentDaysToConvert,
+      segmentTouchpointsToWon,
+      segmentOptions
+    ).slice(0, 15),
     funnel: [
       { stage: "Total tracked", count: filterActive ? matchedCount : identities.length },
       { stage: "Identified", count: filterActive ? matchedIdentifiedCount : identities.filter((i) => i.email).length },
@@ -797,6 +927,9 @@ export function buildPortalSummary(
         rate: total > 0 ? converted / total : 0,
       }))
       .sort((a, b) => (a.weekStart < b.weekStart ? -1 : 1)),
+    assistedConversions: Array.from(assistedConversionCounts.entries())
+      .map(([channel, wonCount]) => ({ channel, wonCount, wonRate: totalWonForAssists > 0 ? wonCount / totalWonForAssists : 0 }))
+      .sort((a, b) => b.wonCount - a.wonCount),
     distinctUtmValues,
   };
 }

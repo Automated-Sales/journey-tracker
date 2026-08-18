@@ -179,6 +179,22 @@ export async function listDealFields(token: string): Promise<any[]> {
   return json.data ?? [];
 }
 
+// Leads have their OWN, completely separate Label system from Deals —
+// confirmed via GET /v1/leadLabels returning {id (a UUID, not a small
+// integer like Deal's), name, color} objects, distinct from Deal's
+// built-in "label" field (in /dealFields, with small-integer option
+// IDs). A Lead's own `label_ids` array (present directly on Lead
+// webhook payloads and live records) references THIS set, not Deal's —
+// see routes/portal.ts's listSegmentableFields for where these two
+// sources get merged into one resolvable options list.
+export async function listLeadLabels(token: string): Promise<Array<{ id: string; name: string }>> {
+  const json: any = await pdFetchV1(token, `/leadLabels`);
+  const data = json.data ?? [];
+  return data
+    .filter((l: any) => typeof l.id === "string" && typeof l.name === "string")
+    .map((l: any) => ({ id: l.id, name: l.name }));
+}
+
 export async function createPersonField(
   token: string,
   name: string,

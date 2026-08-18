@@ -126,6 +126,7 @@ trackRouter.post("/track", requireTenant, requireTenantSecret("key", "trackKey")
       gclid: clickIds.gclid || null,
       fbclid: clickIds.fbclid || null,
       msclkid: clickIds.msclkid || null,
+      liFatId: clickIds.li_fat_id || null,
       referrer: referrer || null,
       url,
       title: title || null,

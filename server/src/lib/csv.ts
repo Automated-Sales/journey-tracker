@@ -1,6 +1,7 @@
 import { Identity, Touchpoint, isIdentified } from "../db";
 import { buildAttributionSummary } from "./attribution";
 import { deepLinkForPerson } from "./pipedrive";
+import { createHash } from "crypto";
 
 /**
  * Pure CSV helpers for the dashboard's "Download CSV" buttons — kept
@@ -185,6 +186,20 @@ function formatGoogleAdsTime(d: Date): string {
   )}:${pad(d.getUTCSeconds())} +0000`;
 }
 
+// M/D/YYYY h:mm:ss AM/PM, no leading zeros on month/day/hour — matches
+// the one fully authoritative example row found in Microsoft's own Bulk
+// Service docs ("4/1/2020 6:50:54 PM"). See
+// buildMicrosoftAdsConversionsCsv's doc comment for the caveat on
+// exactly which upload flow this format was confirmed against.
+function formatMicrosoftAdsTime(d: Date): string {
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  let hours = d.getUTCHours();
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12;
+  if (hours === 0) hours = 12;
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()}/${d.getUTCFullYear()} ${hours}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())} ${ampm}`;
+}
+
 /**
  * The dashboard's "Google Ads conversion feedback" export (see
  * routes/portal.ts and dashboard.html's matching card) — closes the
@@ -212,13 +227,15 @@ function formatGoogleAdsTime(d: Date): string {
  * side, same idea as the Pipedrive custom fields needing setup:pipedrive
  * run once per tenant.
  *
- * Conversion Value/Currency are always blank: this app doesn't capture
- * Pipedrive's Deal monetary value anywhere yet, so there's nothing
- * accurate to report. Leaving them blank is valid per Google's spec
- * (both columns are optional) — Target CPA bidding works fine without
- * them; Target ROAS specifically wants real values, so that's a natural
- * next step if this proves useful (capture Deal.value on the deal
- * webhook, same pattern as everything else in webhooks.ts).
+ * Conversion Value/Currency: populated when known — "CRM Deal Won" uses
+ * the identity's actual won value/currency (captured at the moment the
+ * Deal was marked Won); "CRM Deal Created" uses the earlier
+ * dealValueAtCreate estimate (see db.ts's Tenant.dealValueAtCreate doc
+ * comment for why these are two separate captured numbers, not the same
+ * value reused). Left blank when the underlying value wasn't captured
+ * (e.g. a webhook that happened to omit it — see webhooks.ts's own
+ * caveat on this) — blank is valid per Google's spec, Target CPA works
+ * fine without a value; Target ROAS specifically wants one.
  *
  * Only includes identities whose FIRST touch had a Google Click ID
  * (ad_click channel touchpoints capture this) — nothing to match a
@@ -227,6 +244,50 @@ function formatGoogleAdsTime(d: Date): string {
  * just reject anyway).
  */
 export function buildGoogleAdsConversionsCsv(identities: Identity[], touchpoints: Touchpoint[]): string {
+  return buildAdClickConversionsCsv(identities, touchpoints, {
+    clickIdHeader: "Google Click ID",
+    currencyHeader: "Currency Code",
+    getClickId: (s) => s.firstTouchGclid,
+    formatTime: formatGoogleAdsTime,
+  });
+}
+
+// Same shape as Google's export above (same doc comment applies for the
+// overall design: two events, value/currency populated when known,
+// only identities with a matching first-touch click ID) — this is the
+// standard manual "Upload a file" CSV format under Tools > Conversion
+// Tracking > Conversion Goals in Microsoft Advertising, confirmed
+// against several current (2026) sources. One genuine format
+// difference from Google: Conversion Time uses M/D/YYYY h:mm:ss AM/PM
+// (no leading zeros), taken from Microsoft's own official Bulk Service
+// documentation example row — the only fully authoritative source found
+// for the exact string format, though that doc is technically for the
+// Bulk API rather than the manual CSV upload specifically, so it's
+// worth a quick check against the current upload UI before first use
+// (same caveat as Google's own export). Also worth knowing: Microsoft's
+// official downloadable template includes a timezone "Parameters" cell
+// at the top of the file, which a from-scratch CSV like this one won't
+// have — if the upload rejects on that, the timestamps below are in UTC
+// (+0000), so setting the Parameters cell to 0000 should reconcile it.
+export function buildMicrosoftAdsConversionsCsv(identities: Identity[], touchpoints: Touchpoint[]): string {
+  return buildAdClickConversionsCsv(identities, touchpoints, {
+    clickIdHeader: "Microsoft Click ID",
+    currencyHeader: "Conversion Currency",
+    getClickId: (s) => s.firstTouchMsclkid,
+    formatTime: formatMicrosoftAdsTime,
+  });
+}
+
+function buildAdClickConversionsCsv(
+  identities: Identity[],
+  touchpoints: Touchpoint[],
+  opts: {
+    clickIdHeader: string;
+    currencyHeader: string;
+    getClickId: (summary: NonNullable<ReturnType<typeof buildAttributionSummary>>) => string | null;
+    formatTime: (d: Date) => string;
+  }
+): string {
   const byIdentity = new Map<string, Touchpoint[]>();
   for (const tp of touchpoints) {
     if (!tp.identityId) continue;
@@ -239,16 +300,98 @@ export function buildGoogleAdsConversionsCsv(identities: Identity[], touchpoints
   for (const identity of identities) {
     const tps = byIdentity.get(identity.id) ?? [];
     const summary = buildAttributionSummary(tps);
-    const gclid = summary?.firstTouchGclid;
-    if (!gclid) continue;
+    const clickId = summary ? opts.getClickId(summary) : null;
+    if (!clickId) continue;
 
     if (identity.dealCreatedDealId !== null && identity.dealCreatedAt) {
-      rows.push([gclid, "CRM Deal Created", formatGoogleAdsTime(identity.dealCreatedAt), "", ""]);
+      rows.push([
+        clickId,
+        "CRM Deal Created",
+        opts.formatTime(identity.dealCreatedAt),
+        identity.dealValueAtCreate ?? "",
+        identity.dealValueAtCreate !== null ? identity.dealCurrencyAtCreate ?? "" : "",
+      ]);
     }
     if (identity.wonDealId !== null && identity.dealWonAt) {
-      rows.push([gclid, "CRM Deal Won", formatGoogleAdsTime(identity.dealWonAt), "", ""]);
+      rows.push([
+        clickId,
+        "CRM Deal Won",
+        opts.formatTime(identity.dealWonAt),
+        identity.dealValue ?? "",
+        identity.dealValue !== null ? identity.dealCurrency ?? "" : "",
+      ]);
     }
   }
 
-  return toCsv(["Google Click ID", "Conversion Name", "Conversion Time", "Conversion Value", "Currency Code"], rows);
+  return toCsv([opts.clickIdHeader, "Conversion Name", "Conversion Time", "Conversion Value", opts.currencyHeader], rows);
+}
+
+/**
+ * LinkedIn Ads conversion feedback — genuinely LESS certain than the
+ * Google/Microsoft exports above, worth reading carefully before first
+ * use. LinkedIn's manual "Upload a CSV file" flow in Campaign Manager
+ * matches primarily by HASHED EMAIL (SHA-256), not by li_fat_id
+ * directly — li_fat_id (LinkedIn's own click ID, captured via
+ * routes/track.ts and stored per touchpoint since this same session)
+ * is documented as a supplementary match signal used mainly through
+ * LinkedIn's full Conversions API rather than the simple manual
+ * upload. Every other export in this file (Google, Microsoft) was
+ * built against a concrete, sourced example row; this one wasn't — the
+ * exact column headers/order for LinkedIn's OWN downloadable template
+ * weren't available to confirm, only the general shape (hashed email +
+ * optional click ID + conversion name/time/value). Download LinkedIn's
+ * actual template from Campaign Manager → Conversion Tracking before
+ * first real upload and adjust column headers here if they differ.
+ *
+ * Email is lowercased and trimmed before hashing (LinkedIn's own
+ * documented normalization for hashed-identifier matching, same
+ * convention Google/Meta also use for their own hashed-match systems).
+ * Only includes identities with both an email AND either a captured
+ * li_fat_id OR a Deal milestone to report — an identity with neither
+ * has nothing LinkedIn could plausibly match against.
+ */
+function sha256Lowercase(value: string): string {
+  return createHash("sha256").update(value.trim().toLowerCase()).digest("hex");
+}
+
+export function buildLinkedInAdsConversionsCsv(identities: Identity[], touchpoints: Touchpoint[]): string {
+  const byIdentity = new Map<string, Touchpoint[]>();
+  for (const tp of touchpoints) {
+    if (!tp.identityId) continue;
+    const list = byIdentity.get(tp.identityId) ?? [];
+    list.push(tp);
+    byIdentity.set(tp.identityId, list);
+  }
+
+  const rows: (string | number | null)[][] = [];
+  for (const identity of identities) {
+    if (!identity.email) continue;
+    const tps = byIdentity.get(identity.id) ?? [];
+    const summary = buildAttributionSummary(tps);
+    const liFatId = summary?.firstTouchLiFatId ?? "";
+    const hashedEmail = sha256Lowercase(identity.email);
+
+    if (identity.dealCreatedDealId !== null && identity.dealCreatedAt) {
+      rows.push([
+        hashedEmail,
+        liFatId,
+        "CRM Deal Created",
+        formatGoogleAdsTime(identity.dealCreatedAt), // reused: same ISO-ish "yyyy-MM-dd HH:mm:ss" shape is broadly accepted, unlike Microsoft's specific AM/PM format which is Microsoft-documented, not LinkedIn-documented
+        identity.dealValueAtCreate ?? "",
+        identity.dealValueAtCreate !== null ? identity.dealCurrencyAtCreate ?? "" : "",
+      ]);
+    }
+    if (identity.wonDealId !== null && identity.dealWonAt) {
+      rows.push([
+        hashedEmail,
+        liFatId,
+        "CRM Deal Won",
+        formatGoogleAdsTime(identity.dealWonAt),
+        identity.dealValue ?? "",
+        identity.dealValue !== null ? identity.dealCurrency ?? "" : "",
+      ]);
+    }
+  }
+
+  return toCsv(["Hashed Email (SHA-256)", "LinkedIn Click ID", "Conversion Name", "Conversion Time", "Conversion Value", "Currency Code"], rows);
 }

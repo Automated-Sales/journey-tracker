@@ -202,6 +202,7 @@ export async function recordTouchpoint(tenant: Tenant, tp: RawTouchpoint) {
       gclid: tp.gclid ?? undefined,
       fbclid: tp.fbclid ?? undefined,
       msclkid: tp.msclkid ?? undefined,
+      liFatId: tp.liFatId ?? undefined,
       referrer: tp.referrer ?? undefined,
       url: tp.url ?? undefined,
       title: tp.title ?? undefined,

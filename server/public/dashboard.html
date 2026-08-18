@@ -164,6 +164,28 @@
     </div>
 
     <div class="as-card as-install-card" style="margin-bottom:28px;">
+      <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Microsoft Ads conversion feedback</h3>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
+        Same idea, for Microsoft Advertising (Bing) — closes the loop between what actually became a lead or customer and the ad click that brought them in. Upload it under <strong>Tools → Conversion Tracking → Conversion Goals</strong>, using the Upload a file option.
+      </p>
+      <p style="background:#fdf6e8; border:1px solid #f0dfae; color:#7a5c12; border-radius:10px; padding:12px 14px; font-size:13px; margin:0 0 16px;">
+        <strong>One-time setup needed first:</strong> create two Offline Conversion goals in Microsoft Advertising named exactly <code>CRM Deal Created</code> and <code>CRM Deal Won</code>. Microsoft requires waiting at least 2 hours after creating a new goal before its first upload. Only prospects whose first touch was a Microsoft/Bing ad click are included.
+      </p>
+      <a class="as-btn as-btn-primary" href="/api/export/microsoft-ads-conversions.csv" download>Download conversions CSV</a>
+    </div>
+
+    <div class="as-card as-install-card" style="margin-bottom:28px;">
+      <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">LinkedIn Ads conversion feedback</h3>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
+        Same idea, for LinkedIn Ads. Upload it in Campaign Manager under Conversion Tracking → Upload a CSV file.
+      </p>
+      <p style="background:#fdf6e8; border:1px solid #f0dfae; color:#7a5c12; border-radius:10px; padding:12px 14px; font-size:13px; margin:0 0 16px;">
+        <strong>Worth checking before your first upload:</strong> LinkedIn matches primarily on <em>hashed email</em>, not a click ID directly — that's what this file uses. This one's less battle-tested than the Google/Microsoft exports above, since LinkedIn's exact template wasn't available to confirm against. Compare the column headers here with LinkedIn's own downloadable template in Campaign Manager first, and adjust if they differ. As with the others, create two Conversion goals named exactly <code>CRM Deal Created</code> and <code>CRM Deal Won</code> first.
+      </p>
+      <a class="as-btn as-btn-primary" href="/api/export/linkedin-ads-conversions.csv" download>Download conversions CSV</a>
+    </div>
+
+    <div class="as-card as-install-card" style="margin-bottom:28px;">
       <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Tracking social traffic</h3>
       <p style="color:var(--as-body); font-size:13.5px; margin:0 0 12px;">
         <strong>Paid social</strong> (Facebook/Instagram Ads, LinkedIn Ads, etc.) works the same way as Google/Bing Ads: add UTM parameters to the ad's destination URL in the ad platform itself (e.g. <code>?utm_source=facebook&amp;utm_medium=cpc&amp;utm_campaign=...</code>). Facebook and Instagram click IDs (<code>fbclid</code>) are also captured automatically when the platform appends one, the same way <code>gclid</code> is for Google Ads.
@@ -254,6 +276,18 @@
       <p class="as-panel-title">Campaign performance</p>
       <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">The same view, grouped by campaign instead of source. Each prospect is counted once here, so these numbers won't match "Top campaigns" above, which counts every touchpoint.</p>
       <div id="campaign-performance"></div>
+    </div>
+
+    <div class="as-card" id="segment-performance-card" style="margin-bottom:20px; display:none;">
+      <p class="as-panel-title">Conversion by segment</p>
+      <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">The same view, grouped by your configured Segment field (see Settings further down). A prospect with more than one segment (e.g. two Labels) is counted once in each — rows can add up to more than the total tracked.</p>
+      <div id="segment-performance"></div>
+    </div>
+
+    <div class="as-card" id="assisted-conversions-card" style="margin-bottom:20px; display:none;">
+      <p class="as-panel-title">Assisted conversions</p>
+      <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">Unlike every other report here (all first-touch), this looks at a Won deal's ENTIRE journey — which channels showed up anywhere along the way, not just the first or last one. Surfaces assist channels like retargeting or email nurture that never get credit under first/last-touch attribution. Rows don't sum to 100%: a single Won deal's journey can touch several channels, each counted.</p>
+      <div id="assisted-conversions"></div>
     </div>
 
     <div class="as-card">
@@ -532,6 +566,7 @@
   var conversionTableState = {
     source: { rows: [], sortMode: 'volume' },
     campaign: { rows: [], sortMode: 'volume' },
+    segment: { rows: [], sortMode: 'volume' },
   };
   var LOW_SAMPLE_THRESHOLD = 3; // below this, the rate is flagged as low-sample rather than hidden — see sortConversionRows' doc comment for why
 
@@ -571,7 +606,40 @@
     return (Math.round(avgTouchpoints * 10) / 10).toString();
   }
 
-  function renderConversionTable(container, rows, keyName, emptyMessage) {
+  // Simple ranked list, not a full table like the conversion reports —
+  // there's really only one number worth showing per channel here (what
+  // share of Won deals had it appear anywhere), so a table's extra
+  // columns (revenue, days-to-convert etc.) wouldn't add anything and
+  // would just repeat what Conversion by source already shows for the
+  // FIRST-touch view of the same channels.
+  function renderAssistedConversions(container, rows) {
+    if (!rows.length) {
+      container.innerHTML = '<div class="as-empty">No Won deals yet.</div>';
+      return;
+    }
+    var max = rows[0].wonCount;
+    container.innerHTML = rows
+      .map(function (r) {
+        var pct = Math.round(r.wonRate * 100);
+        var widthPct = max > 0 ? Math.max(4, (r.wonCount / max) * 100) : 0;
+        return (
+          '<div class="as-bar-row as-clickable-row" data-filter-by="assistedChannel" data-filter-value="' + esc(r.channel) + '" data-filter-label="Assisted by: ' + esc(r.channel) + '">' +
+          '<div class="as-bar-label" title="' + esc(r.channel) + '">' + esc(r.channel) + '</div>' +
+          '<div class="as-bar-track"><div class="as-bar-fill" style="width:' + widthPct + '%"></div></div>' +
+          '<div class="as-bar-count">' + r.wonCount + ' <span style="color:var(--as-body); font-weight:600;">(' + pct + '%)</span></div>' +
+          '</div>'
+        );
+      })
+      .join('');
+    container.querySelectorAll('[data-filter-by]').forEach(function (row) {
+      row.addEventListener('click', function () {
+        openProspectModal(row.getAttribute('data-filter-by'), row.getAttribute('data-filter-value'), row.getAttribute('data-filter-label'));
+      });
+    });
+  }
+
+  function renderConversionTable(container, rows, keyName, emptyMessage, filterValueKey) {
+    filterValueKey = filterValueKey || keyName; // segment is the one case where the displayed name (segmentName) and the drill-down's filter value (segmentId, the raw Pipedrive option ID) differ
     conversionTableState[keyName].rows = rows;
     var sortMode = conversionTableState[keyName].sortMode;
 
@@ -580,7 +648,7 @@
       return;
     }
     var sortedRows = sortConversionRows(rows, sortMode);
-    var label = keyName === 'source' ? 'Source' : 'Campaign';
+    var label = keyName === 'source' ? 'Source' : keyName === 'campaign' ? 'Campaign' : 'Segment';
 
     var toggleHtml =
       '<div class="as-sort-toggle">' +
@@ -599,10 +667,11 @@
           var pct = Math.round(r.rate * 100);
           var rateClass = r.rate >= 0.2 ? ' as-rate-good' : '';
           var value = r[keyName];
+          var filterValue = r[filterValueKey];
           var lowSample = r.total < LOW_SAMPLE_THRESHOLD;
           var rateLabel = pct + '%' + (lowSample ? ' <span title="Based on only ' + r.total + ' prospect' + (r.total === 1 ? '' : 's') + ' — treat with caution">*</span>' : '');
           return (
-            '<tr class="as-clickable-row" data-filter-by="' + keyName + '" data-filter-value="' + esc(value) + '" data-filter-label="' + esc(label) + ': ' + esc(value) + '"><td>' +
+            '<tr class="as-clickable-row" data-filter-by="' + keyName + '" data-filter-value="' + esc(filterValue) + '" data-filter-label="' + esc(label) + ': ' + esc(value) + '"><td>' +
             esc(value) +
             '</td><td>' +
             r.total +
@@ -631,7 +700,7 @@
     container.querySelectorAll('.as-sort-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
         conversionTableState[keyName].sortMode = btn.getAttribute('data-sort');
-        renderConversionTable(container, conversionTableState[keyName].rows, keyName, emptyMessage);
+        renderConversionTable(container, conversionTableState[keyName].rows, keyName, emptyMessage, filterValueKey);
       });
     });
   }
@@ -1444,6 +1513,28 @@
     renderConversionTrend(document.getElementById('conversion-trend'), s.conversionTrend);
     renderCampaigns(document.getElementById('campaigns-table'), s.topCampaigns);
     renderConversionTable(document.getElementById('campaign-performance'), s.campaignPerformance, 'campaign', 'No campaign data yet.');
+
+    // Both hidden entirely (not just "empty state") for tenants with
+    // nothing to show — a "Conversion by segment" card with zero rows
+    // for every tenant who hasn't configured a segment field would just
+    // be clutter, not a genuine empty state worth explaining.
+    var segmentCard = document.getElementById('segment-performance-card');
+    if (s.segmentPerformance.length) {
+      segmentCard.style.display = 'block';
+      var segmentRows = s.segmentPerformance.map(function (r) { return Object.assign({}, r, { segment: r.segmentName }); });
+      renderConversionTable(document.getElementById('segment-performance'), segmentRows, 'segment', 'No segment data yet.', 'segmentId');
+    } else {
+      segmentCard.style.display = 'none';
+    }
+
+    var assistedCard = document.getElementById('assisted-conversions-card');
+    if (s.assistedConversions.length) {
+      assistedCard.style.display = 'block';
+      renderAssistedConversions(document.getElementById('assisted-conversions'), s.assistedConversions);
+    } else {
+      assistedCard.style.display = 'none';
+    }
+
     // Recently active prospects is deliberately NOT rendered from
     // s.recent here — that field is capped at 25 (kept only for
     // backward compat, nothing reads it anymore) and has no pagination

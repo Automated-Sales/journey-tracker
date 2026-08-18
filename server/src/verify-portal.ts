@@ -19,7 +19,7 @@ import { db } from "./db";
 import { hashPassword, verifyPassword } from "./lib/auth";
 import { validateSignupForm, provisionSelfServeTenant } from "./lib/portal-signup";
 import { buildPortalSummary, filterProspects, filterIdentities, paginateProspects } from "./lib/portal-summary";
-import { buildProspectsCsv, buildCampaignsCsv, buildGoogleAdsConversionsCsv } from "./lib/csv";
+import { buildProspectsCsv, buildCampaignsCsv, buildGoogleAdsConversionsCsv, buildMicrosoftAdsConversionsCsv, buildLinkedInAdsConversionsCsv } from "./lib/csv";
 import { Identity, Touchpoint } from "./db";
 
 function assert(cond: boolean, msg: string) {
@@ -43,6 +43,7 @@ function fixtureTouchpoint(overrides: Partial<Touchpoint>): Touchpoint {
     gclid: null,
     fbclid: null,
     msclkid: null,
+    liFatId: null,
     referrer: null,
     url: null,
     title: null,
@@ -297,6 +298,52 @@ async function main() {
   assert(
     thisWeek.total === 1 && thisWeek.converted === 1 && thisWeek.rate === 1,
     "conversionTrend: a first touch occurring right now lands in the final (this week's) bucket, and reflects the identity's CURRENT converted state"
+  );
+
+  // --- segmentPerformance (multi-select: one identity counts in EACH of its segments) ---
+  const multiSegmentIdentity = fixtureIdentity({
+    id: "idA",
+    email: "a@example.com",
+    segmentValue: "12,45", // two Labels
+    dealCreatedDealId: 801,
+    wonDealId: 801,
+    dealValue: 2000,
+    dealCurrency: "USD",
+  });
+  const singleSegmentIdentity = fixtureIdentity({ id: "idB", email: "b@example.com", segmentValue: "45" });
+  const segOptions = [
+    { id: "12", name: "Villas" },
+    { id: "45", name: "Apartments" },
+  ];
+  const segPerfSummary = buildPortalSummary([multiSegmentIdentity, singleSegmentIdentity, idC], tps, undefined, segOptions);
+  const villasRow = segPerfSummary.segmentPerformance.find((s) => s.segmentId === "12");
+  const apartmentsRow = segPerfSummary.segmentPerformance.find((s) => s.segmentId === "45");
+  assert(
+    villasRow?.segmentName === "Villas" && villasRow?.total === 1 && villasRow?.converted === 1 && villasRow?.wonRevenue.USD === 2000,
+    "segmentPerformance: idA (segments '12,45') counts toward the 'Villas' (id 12) row, including its Won revenue"
+  );
+  assert(
+    apartmentsRow?.total === 2,
+    "segmentPerformance: 'Apartments' (id 45) total is 2 — both idA (multi-select, also in Villas) AND idB (single-select) count toward it, proving multi-select membership doesn't exclude an identity from other groups"
+  );
+
+  // --- assistedConversions (multi-touch: every channel in a Won journey, not just first/last) ---
+  const assistTps = [
+    fixtureTouchpoint({ identityId: "idA", channel: "ad_click", source: "google", occurredAt: new Date("2026-03-01") }),
+    fixtureTouchpoint({ identityId: "idA", channel: "email_click", source: "mailchimp", occurredAt: new Date("2026-03-05") }),
+    fixtureTouchpoint({ identityId: "idA", channel: "pipedrive_stage_change", source: "pipedrive", occurredAt: new Date("2026-03-10") }),
+  ];
+  const assistIdentity = fixtureIdentity({ id: "idA", email: "a@example.com", wonDealId: 900 });
+  const notWonIdentity = fixtureIdentity({ id: "idB", email: "b@example.com" });
+  const notWonTp = fixtureTouchpoint({ identityId: "idB", channel: "email_click", source: "mailchimp", occurredAt: new Date("2026-03-02") });
+  const assistSummary = buildPortalSummary([assistIdentity, notWonIdentity], [...assistTps, notWonTp]);
+  assert(
+    assistSummary.assistedConversions.find((a) => a.channel === "Email click")?.wonCount === 1,
+    "assistedConversions: 'Email click' counts for idA's Won journey even though it was the MIDDLE touch, not first or last — the whole point of this being a multi-touch view"
+  );
+  assert(
+    assistSummary.assistedConversions.every((a) => a.channel !== "Email click" || a.wonRate === 1),
+    "assistedConversions: wonRate is relative to total WON identities (1), not total identities (2) — idB never converted, so it shouldn't dilute the denominator"
   );
 
   const recentTp = fixtureTouchpoint({ identityId: "idA", channel: "website_visit", occurredAt: new Date() });
@@ -590,7 +637,88 @@ async function main() {
     gAdsLines.some((l) => l.startsWith("Cj0KCQjw_test_gclid,CRM Deal Won,2026-02-15 14:30:05 +0000")),
     "buildGoogleAdsConversionsCsv: Deal Won row uses dealWonAt (the timestamp this feature specifically started persisting), not dealCreatedAt or lastSeenAt"
   );
-  assert(gAdsCsv.includes(",,"), "buildGoogleAdsConversionsCsv: Conversion Value and Currency Code are both blank — no Deal value tracked yet");
+  assert(gAdsCsv.includes(",,"), "buildGoogleAdsConversionsCsv: Conversion Value and Currency Code are blank when the underlying value wasn't captured, not '0' or 'undefined'");
+
+  const gclidWithValueIdentity = fixtureIdentity({
+    id: "idK",
+    email: "value@example.com",
+    dealCreatedDealId: 703,
+    dealCreatedAt: new Date("2026-02-01T10:00:00Z"),
+    dealValueAtCreate: 4500,
+    dealCurrencyAtCreate: "GBP",
+    wonDealId: 703,
+    dealWonAt: new Date("2026-02-15T14:30:05Z"),
+    dealValue: 5000,
+    dealCurrency: "GBP",
+  });
+  const gclidWithValueTp = fixtureTouchpoint({ identityId: "idK", channel: "ad_click", source: "google", gclid: "Cj0K_value_gclid" });
+  const gAdsValueCsv = buildGoogleAdsConversionsCsv([gclidWithValueIdentity], [gclidWithValueTp]);
+  assert(
+    gAdsValueCsv.includes("Cj0K_value_gclid,CRM Deal Created,2026-02-01 10:00:00 +0000,4500,GBP"),
+    "buildGoogleAdsConversionsCsv: Deal Created row now includes dealValueAtCreate/dealCurrencyAtCreate when captured"
+  );
+  assert(
+    gAdsValueCsv.includes("Cj0K_value_gclid,CRM Deal Won,2026-02-15 14:30:05 +0000,5000,GBP"),
+    "buildGoogleAdsConversionsCsv: Deal Won row uses the final dealValue/dealCurrency (5000), not the earlier dealValueAtCreate estimate (4500)"
+  );
+
+  // --- buildMicrosoftAdsConversionsCsv (msclkid, not gclid) ---------------
+  const msclkidIdentity = fixtureIdentity({
+    id: "idL",
+    email: "msclkid@example.com",
+    dealCreatedDealId: 704,
+    dealCreatedAt: new Date("2026-02-01T18:50:54Z"),
+    wonDealId: 704,
+    dealWonAt: new Date("2026-02-15T06:05:03Z"), // 6:05:03 AM UTC — checks the AM/PM + no-leading-zero-hour formatting
+  });
+  const msclkidTp = fixtureTouchpoint({ identityId: "idL", channel: "ad_click", source: "bing_ads", msclkid: "f894f652ea334e739002f7167ab8f8e3" });
+  const msAdsCsv = buildMicrosoftAdsConversionsCsv([msclkidIdentity, gclidIdentity], [msclkidTp, gclidTp]);
+  const msAdsLines = msAdsCsv.trim().split("\r\n");
+  assert(
+    msAdsLines[0] === "Microsoft Click ID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency",
+    "buildMicrosoftAdsConversionsCsv: header uses 'Microsoft Click ID' and 'Conversion Currency' (not Google's 'Google Click ID'/'Currency Code')"
+  );
+  assert(
+    msAdsLines.length === 3,
+    "buildMicrosoftAdsConversionsCsv: only msclkidIdentity's 2 rows — gclidIdentity has no MSCLKID, so it's correctly excluded even though it has a GCLID"
+  );
+  assert(
+    msAdsCsv.includes("f894f652ea334e739002f7167ab8f8e3,CRM Deal Created,2/1/2026 6:50:54 PM"),
+    "buildMicrosoftAdsConversionsCsv: Conversion Time is M/D/YYYY h:mm:ss AM/PM with no leading zeros, matching Microsoft's own documented example format"
+  );
+  assert(
+    msAdsCsv.includes("f894f652ea334e739002f7167ab8f8e3,CRM Deal Won,2/15/2026 6:05:03 AM"),
+    "buildMicrosoftAdsConversionsCsv: hour 6 stays '6' (not '06') and correctly shows AM for a pre-noon UTC time"
+  );
+
+  // --- buildLinkedInAdsConversionsCsv (hashed email, not click ID alone) --
+  const liIdentity = fixtureIdentity({
+    id: "idM",
+    email: "  LinkedIn.Test@Example.com  ", // deliberately messy casing/whitespace to check normalization before hashing
+    dealCreatedDealId: 705,
+    dealCreatedAt: new Date("2026-02-01T10:00:00Z"),
+    wonDealId: 705,
+    dealWonAt: new Date("2026-02-15T14:30:05Z"),
+    dealValue: 3000,
+    dealCurrency: "USD",
+  });
+  const liTp = fixtureTouchpoint({ identityId: "idM", channel: "ad_click", source: "linkedin_ads", liFatId: "li_test_fat_id_123" });
+  const noEmailIdentity = fixtureIdentity({ id: "idN", email: null, dealCreatedDealId: 706, dealCreatedAt: new Date("2026-02-01") });
+  const noEmailTp = fixtureTouchpoint({ identityId: "idN", channel: "ad_click", source: "linkedin_ads", liFatId: "li_should_be_excluded" });
+
+  const liCsv = buildLinkedInAdsConversionsCsv([liIdentity, noEmailIdentity], [liTp, noEmailTp]);
+  const liLines = liCsv.trim().split("\r\n");
+  assert(
+    liLines[0] === "Hashed Email (SHA-256),LinkedIn Click ID,Conversion Name,Conversion Time,Conversion Value,Currency Code",
+    "buildLinkedInAdsConversionsCsv: header matches the documented shape (hashed email is the primary identifier, not the click ID alone)"
+  );
+  assert(liLines.length === 3, "buildLinkedInAdsConversionsCsv: noEmailIdentity is excluded entirely (no email = nothing LinkedIn could match), even though it has a li_fat_id");
+  const expectedHash = require("crypto").createHash("sha256").update("linkedin.test@example.com").digest("hex");
+  assert(
+    liCsv.includes(expectedHash + ",li_test_fat_id_123,CRM Deal Created"),
+    "buildLinkedInAdsConversionsCsv: email is lowercased and trimmed before hashing, so messy casing/whitespace still produces the correct, consistent hash"
+  );
+  assert(liCsv.includes(",CRM Deal Won,2026-02-15 14:30:05 +0000,3000,USD"), "buildLinkedInAdsConversionsCsv: Deal Won row includes the real captured value/currency, same as the other two ad exports");
 
   // --- cleanup -----------------------------------------------------
   await db.tenant.delete(tenant.id);

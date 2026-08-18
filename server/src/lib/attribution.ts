@@ -2,7 +2,7 @@ import { Touchpoint } from "../db";
 
 // Same badge labels the panel uses, kept in one place so the custom-field
 // summary text and the panel timeline describe channels the same way.
-const CHANNEL_LABELS: Record<string, string> = {
+export const CHANNEL_LABELS: Record<string, string> = {
   ad_click: "Ad click",
   ad_impression: "Ad seen",
   website_visit: "Website",
@@ -36,6 +36,7 @@ export interface AttributionSummary {
   firstTouchGclid: string | null;
   firstTouchFbclid: string | null;
   firstTouchMsclkid: string | null;
+  firstTouchLiFatId: string | null;
   firstTouchReferrer: string | null;
   firstTouchLandingPage: string | null;
   lastTouchChannel: string;
@@ -48,6 +49,7 @@ export interface AttributionSummary {
   lastTouchGclid: string | null;
   lastTouchFbclid: string | null;
   lastTouchMsclkid: string | null;
+  lastTouchLiFatId: string | null;
   lastTouchReferrer: string | null;
   lastTouchLandingPage: string | null;
   touchpointCount: number;
@@ -87,6 +89,7 @@ export function buildAttributionSummary(touchpoints: Touchpoint[]): AttributionS
     firstTouchGclid: first.gclid,
     firstTouchFbclid: first.fbclid,
     firstTouchMsclkid: first.msclkid,
+    firstTouchLiFatId: first.liFatId,
     firstTouchReferrer: first.referrer,
     firstTouchLandingPage: first.url,
     lastTouchChannel: CHANNEL_LABELS[last.channel] || last.channel,
@@ -99,6 +102,7 @@ export function buildAttributionSummary(touchpoints: Touchpoint[]): AttributionS
     lastTouchGclid: last.gclid,
     lastTouchFbclid: last.fbclid,
     lastTouchMsclkid: last.msclkid,
+    lastTouchLiFatId: last.liFatId,
     lastTouchReferrer: last.referrer,
     lastTouchLandingPage: last.url,
     touchpointCount: touchpoints.length,

@@ -27,6 +27,7 @@ export interface RawTouchpoint {
   gclid?: string | null;
   fbclid?: string | null;
   msclkid?: string | null;
+  liFatId?: string | null;
   referrer?: string | null;
   url?: string | null;
   title?: string | null;

@@ -130,6 +130,14 @@ async function init() {
   ensureColumn("touchpoints", "gclid", "TEXT");
   ensureColumn("touchpoints", "fbclid", "TEXT");
   ensureColumn("touchpoints", "msclkid", "TEXT");
+  // Added later than gclid/fbclid/msclkid — routes/track.ts already
+  // parsed li_fat_id (LinkedIn's click ID) to help detect the
+  // "linkedin_ads" source, but never gave it its own dedicated column
+  // the way the other three have, so the raw value itself was
+  // discarded rather than retrievable later (e.g. for a LinkedIn
+  // conversions export). This closes that gap, mirroring gclid/fbclid/
+  // msclkid exactly.
+  ensureColumn("touchpoints", "liFatId", "TEXT");
   ensureColumn("touchpoints", "referrer", "TEXT");
   // Deal-lifecycle milestones: how much engagement happened before a
   // contact became a Deal, and before that Deal was Won — frozen once
@@ -412,6 +420,7 @@ export interface Touchpoint {
   gclid: string | null;
   fbclid: string | null;
   msclkid: string | null;
+  liFatId: string | null;
   referrer: string | null;
   url: string | null;
   title: string | null;
@@ -1041,6 +1050,7 @@ export const db = {
           gclid: data.gclid ?? null,
           fbclid: data.fbclid ?? null,
           msclkid: data.msclkid ?? null,
+          liFatId: data.liFatId ?? null,
           referrer: data.referrer ?? null,
           url: data.url ?? null,
           title: data.title ?? null,
@@ -1049,8 +1059,8 @@ export const db = {
           createdAt: new Date().toISOString(),
         };
         sqlite.run(
-          `INSERT INTO touchpoints (id, tenantId, identityId, anonymousId, channel, source, campaign, medium, content, term, clickId, gclid, fbclid, msclkid, referrer, url, title, metadata, occurredAt, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO touchpoints (id, tenantId, identityId, anonymousId, channel, source, campaign, medium, content, term, clickId, gclid, fbclid, msclkid, liFatId, referrer, url, title, metadata, occurredAt, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             row.id,
             row.tenantId,
@@ -1066,6 +1076,7 @@ export const db = {
             row.gclid,
             row.fbclid,
             row.msclkid,
+            row.liFatId,
             row.referrer,
             row.url,
             row.title,

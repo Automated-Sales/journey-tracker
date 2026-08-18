@@ -874,6 +874,10 @@ tr.as-clickable-row:hover {
   background: #f8faf9;
 }
 
+.as-bar-row.as-clickable-row:hover .as-bar-label {
+  text-decoration: underline;
+}
+
 /* Click-through drill-down popup (dashboard.html's openProspectModal). */
 .as-modal-overlay {
   position: fixed;

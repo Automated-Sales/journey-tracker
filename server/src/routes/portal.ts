@@ -1,10 +1,10 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { db, Tenant, Touchpoint } from "../db";
-import { getMe, deepLinkForPerson, listDealFields, listPersonFields } from "../lib/pipedrive";
+import { getMe, deepLinkForPerson, listDealFields, listPersonFields, listLeadLabels } from "../lib/pipedrive";
 import { setupPipedriveFields } from "../lib/pipedrive-field-setup";
 import { validateSignupForm, provisionSelfServeTenant } from "../lib/portal-signup";
 import { buildPortalSummary, filterProspects, filterIdentities, paginateProspects, ProspectFilter, UtmFilter } from "../lib/portal-summary";
-import { buildProspectsCsv, buildCampaignsCsv, buildGoogleAdsConversionsCsv } from "../lib/csv";
+import { buildProspectsCsv, buildCampaignsCsv, buildGoogleAdsConversionsCsv, buildMicrosoftAdsConversionsCsv, buildLinkedInAdsConversionsCsv } from "../lib/csv";
 import { verifyJourneyToken } from "../lib/journey-link";
 import { createCheckoutSession, createBillingPortalSession, stripeConfigured, isBillingActive } from "../lib/stripe";
 import {
@@ -428,11 +428,26 @@ function normalizeFieldKeyForCapture(key: string): string {
 }
 
 async function listSegmentableFields(token: string): Promise<{ key: string; name: string; options: any }[]> {
-  const [personFields, dealFields] = await Promise.all([listPersonFields(token), listDealFields(token)]);
+  const [personFields, dealFields, leadLabels] = await Promise.all([listPersonFields(token), listDealFields(token), listLeadLabels(token)]);
   const named = (fields: any[], entityPrefix: string, suffix: string) =>
     fields
       .filter((f: any) => typeof f.name === "string" && typeof f.key === "string")
-      .map((f: any) => ({ key: `${entityPrefix}::${normalizeFieldKeyForCapture(f.key)}`, name: `${f.name} (${suffix})`, options: f.options }));
+      .map((f: any) => {
+        let options = f.options;
+        // Deal's built-in "label" field and Lead's own /leadLabels are
+        // two DIFFERENT ID namespaces (small integers vs UUIDs — see
+        // lib/pipedrive.ts's listLeadLabels doc comment) that both end
+        // up captured under the same runtime property, label_ids, once
+        // normalizeFieldKeyForCapture combines them into one dropdown
+        // entry below. Merging Lead's options in here too means that
+        // ONE entry's cached options can resolve EITHER shape of ID
+        // correctly, regardless of whether a given identity's segment
+        // came from a Deal or a Lead webhook.
+        if (f.key === "label" && entityPrefix === "deal") {
+          options = [...(Array.isArray(f.options) ? f.options : []), ...leadLabels.map((l) => ({ id: l.id, label: l.name }))];
+        }
+        return { key: `${entityPrefix}::${normalizeFieldKeyForCapture(f.key)}`, name: `${f.name} (${suffix})`, options };
+      });
   return [...named(personFields, "person", "Person"), ...named(dealFields, "deal", "Deal/Lead")].sort((a, b) =>
     a.name.localeCompare(b.name)
   );
@@ -552,6 +567,36 @@ portalRouter.get("/api/export/google-ads-conversions.csv", requireSession, requi
   res.send(buildGoogleAdsConversionsCsv(identities, touchpoints));
 });
 
+/**
+ * Same idea as the Google Ads export above, for Microsoft Advertising —
+ * see lib/csv.ts's buildMicrosoftAdsConversionsCsv doc comment.
+ */
+portalRouter.get("/api/export/microsoft-ads-conversions.csv", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const [identities, touchpoints] = await Promise.all([
+    db.identity.findMany({ where: { tenantId: tenant.id } }),
+    db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
+  ]);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="microsoft-ads-conversions.csv"');
+  res.send(buildMicrosoftAdsConversionsCsv(identities, touchpoints));
+});
+
+/** See lib/csv.ts's buildLinkedInAdsConversionsCsv doc comment — the
+ *  least-verified of the three ad exports, worth checking the column
+ *  headers against LinkedIn's own downloadable template before first
+ *  use. */
+portalRouter.get("/api/export/linkedin-ads-conversions.csv", requireSession, requireActiveBilling, async (req, res) => {
+  const tenant = req.portalTenant!;
+  const [identities, touchpoints] = await Promise.all([
+    db.identity.findMany({ where: { tenantId: tenant.id } }),
+    db.touchpoint.findManyByTenant({ where: { tenantId: tenant.id } }),
+  ]);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="linkedin-ads-conversions.csv"');
+  res.send(buildLinkedInAdsConversionsCsv(identities, touchpoints));
+});
+
 // Shared by /api/summary, /api/prospects/filtered, and
 // /api/export/prospects-filtered.csv — the global UTM filter bar's
 // ?utm_source=/?utm_medium=/?utm_campaign=/?utm_term=/?utm_content=
@@ -662,7 +707,9 @@ function parseProspectFilterQuery(req: Request): ProspectFilter | { error: strin
   }
   if (by === "source") return { type: "source", value };
   if (by === "campaign") return { type: "campaign", value };
-  return { error: "by must be one of: funnel, source, campaign" };
+  if (by === "segment") return { type: "segment", value };
+  if (by === "assistedChannel") return { type: "assistedChannel", value };
+  return { error: "by must be one of: funnel, source, campaign, segment, assistedChannel" };
 }
 
 /**
