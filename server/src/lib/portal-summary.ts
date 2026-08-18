@@ -151,10 +151,20 @@ export interface UtmFilter {
   term?: string;
   content?: string;
   segment?: string;
+  // Not a UTM parameter — the touchpoint CHANNEL itself (e.g.
+  // "ad_click", "website_visit", "pipedrive_lead_created"). Added
+  // alongside the UTM-specific fields above because it's the one
+  // dimension a person could reasonably want to filter by that wasn't
+  // covered — narrows to identities whose FIRST touch was this
+  // specific channel, same "first touch only" convention as every
+  // other field here.
+  channel?: string;
 }
 
 function utmFilterIsEmpty(filter?: UtmFilter): boolean {
-  return !filter || !(filter.source || filter.medium || filter.campaign || filter.term || filter.content || filter.segment);
+  return (
+    !filter || !(filter.source || filter.medium || filter.campaign || filter.term || filter.content || filter.segment || filter.channel)
+  );
 }
 
 function matchesUtmFilter(
@@ -172,13 +182,18 @@ function matchesUtmFilter(
     const values = (identity.segmentValue || "").split(",").map((v) => v.trim()).filter(Boolean);
     if (!values.includes(f.segment)) return false;
   }
-  if (f.source || f.medium || f.campaign || f.term || f.content) {
+  if (f.source || f.medium || f.campaign || f.term || f.content || f.channel) {
     if (!summary) return false;
     if (f.source && summary.firstTouchSource !== f.source) return false;
     if (f.medium && summary.firstTouchMedium !== f.medium) return false;
     if (f.campaign && summary.firstTouchCampaign !== f.campaign) return false;
     if (f.term && summary.firstTouchTerm !== f.term) return false;
     if (f.content && summary.firstTouchContent !== f.content) return false;
+    // firstTouchChannel is already the resolved label (e.g. "Ad click"),
+    // not the raw channel key — see attribution.ts — matching the same
+    // resolved-string convention distinctUtmValues below uses for the
+    // dropdown's own option values.
+    if (f.channel && summary.firstTouchChannel !== f.channel) return false;
   }
   return true;
 }
@@ -199,6 +214,10 @@ export interface DistinctUtmValues {
   // tenant's data (not every option the Pipedrive field theoretically
   // offers), resolved to their readable name via segmentOptions.
   segments: { id: string; name: string }[];
+  // Resolved labels (e.g. "Ad click"), not raw channel keys — same
+  // "only values actually present in this tenant's data" scoping as
+  // every other field here.
+  channels: string[];
 }
 
 function resolveSegmentName(id: string, segmentOptions?: { id: string; name: string }[]): string {
@@ -215,12 +234,14 @@ function collectDistinctUtmValues(
   const campaigns = new Set<string>();
   const terms = new Set<string>();
   const contents = new Set<string>();
+  const channels = new Set<string>();
   for (const tp of touchpoints) {
     if (tp.source) sources.add(tp.source);
     if (tp.medium) mediums.add(tp.medium);
     if (tp.campaign) campaigns.add(tp.campaign);
     if (tp.term) terms.add(tp.term);
     if (tp.content) contents.add(tp.content);
+    channels.add(CHANNEL_LABELS[tp.channel] || tp.channel);
   }
   const segmentIds = new Set<string>();
   for (const identity of identities) {
@@ -237,6 +258,7 @@ function collectDistinctUtmValues(
     segments: Array.from(segmentIds)
       .map((id) => ({ id, name: resolveSegmentName(id, segmentOptions) }))
       .sort((a, b) => alpha(a.name, b.name)),
+    channels: Array.from(channels).sort(alpha),
   };
 }
 
@@ -340,7 +362,42 @@ export interface PortalSummary {
   // handler only has a "won" branch), a known gap rather than an
   // oversight here specifically.
   dealStageBySource: { source: string; stages: { stageName: string; count: number }[] }[];
+  // Real multi-touch attribution — unlike everything else on this
+  // dashboard (first-touch by deliberate convention) or
+  // assistedConversions (binary "did this channel appear," multi-touch
+  // but not weighted), this actually SPLITS each Won deal's value
+  // across every channel in its journey, according to the chosen
+  // model. All three models are precomputed here (not just the
+  // currently-selected one) so switching between them on the dashboard
+  // is instant, same pattern as funnel/funnelValue's Count/Value
+  // toggle above. See computeMultiTouchAttribution's own doc comment
+  // for exactly how each model weights touchpoints.
+  multiTouchAttribution: {
+    linear: MultiTouchAttributionRow[];
+    timeDecay: MultiTouchAttributionRow[];
+    uShaped: MultiTouchAttributionRow[];
+  };
+  notableChanges: NotableChange[];
   distinctUtmValues: DistinctUtmValues;
+}
+
+// One row per channel, for whichever attribution model produced it.
+// creditedConversions is intentionally a FRACTIONAL number, not an
+// integer count — e.g. a channel that got 50% credit on each of 3 Won
+// deals shows 1.5, not 3 — since that's the whole point of splitting
+// credit rather than counting appearances.
+export interface MultiTouchAttributionRow {
+  channel: string;
+  creditedRevenue: RevenueByCurrency;
+  creditedConversions: number;
+}
+
+// Auto-surfaced insight text — "Facebook Ads volume dropped 40% this
+// week" — rather than requiring someone to notice a dip by staring at
+// a chart. See computeNotableChanges for the exact thresholds.
+export interface NotableChange {
+  text: string;
+  direction: "increase" | "decrease";
 }
 
 function toSortedChannelCounts(m: Map<string, number>): ChannelCount[] {
@@ -432,6 +489,138 @@ function toSegmentPerformance(
       };
     })
     .sort((a, b) => b.total - a.total);
+}
+
+/**
+ * Weights for a Won identity's own sequence of touchpoints (already
+ * sorted oldest-first), one weight per touchpoint, always summing to 1
+ * (so multiplying by the deal's value distributes 100% of it, never
+ * more or less, regardless of journey length).
+ *
+ * - linear: equal credit to every touchpoint.
+ * - u_shaped (aka "position-based"): 40% to the first touch, 40% to the
+ *   last touch, the remaining 20% split evenly among everything in
+ *   between. Falls back to 50/50 for a 2-touchpoint journey (no
+ *   "middle" exists) and 100% for a single-touchpoint journey.
+ * - time_decay: exponential decay working backward from wonAt (or the
+ *   last touchpoint if wonAt is somehow missing), 7-day half-life —
+ *   a touchpoint 7 days before the deal closed gets half the credit of
+ *   one on the closing day itself, 14 days before gets a quarter, etc.
+ *   Normalized afterward so the weights still sum to 1.
+ */
+function computeTouchpointWeights(touchpoints: Touchpoint[], model: "linear" | "time_decay" | "u_shaped", wonAt: Date | null): number[] {
+  const n = touchpoints.length;
+  if (n === 0) return [];
+  if (n === 1) return [1];
+
+  if (model === "linear") {
+    return touchpoints.map(() => 1 / n);
+  }
+
+  if (model === "time_decay") {
+    const HALF_LIFE_DAYS = 7;
+    const reference = wonAt ?? touchpoints[n - 1].occurredAt;
+    const rawWeights = touchpoints.map((tp) => {
+      const daysBefore = Math.max(0, (reference.getTime() - tp.occurredAt.getTime()) / (24 * 60 * 60 * 1000));
+      return Math.pow(2, -daysBefore / HALF_LIFE_DAYS);
+    });
+    const sum = rawWeights.reduce((a, b) => a + b, 0);
+    return sum > 0 ? rawWeights.map((w) => w / sum) : touchpoints.map(() => 1 / n);
+  }
+
+  // u_shaped
+  if (n === 2) return [0.5, 0.5];
+  const middleCount = n - 2;
+  const middleWeight = 0.2 / middleCount;
+  return touchpoints.map((_, i) => (i === 0 || i === n - 1 ? 0.4 : middleWeight));
+}
+
+function computeMultiTouchAttribution(
+  wonJourneys: { touchpoints: Touchpoint[]; dealValue: number | null; dealCurrency: string | null; dealWonAt: Date | null }[],
+  model: "linear" | "time_decay" | "u_shaped"
+): MultiTouchAttributionRow[] {
+  const revenueByChannel = new Map<string, Map<string, number>>();
+  const conversionsByChannel = new Map<string, number>();
+
+  for (const journey of wonJourneys) {
+    const sorted = [...journey.touchpoints].sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
+    const weights = computeTouchpointWeights(sorted, model, journey.dealWonAt);
+    sorted.forEach((tp, i) => {
+      const channel = CHANNEL_LABELS[tp.channel] || tp.channel;
+      const weight = weights[i];
+      conversionsByChannel.set(channel, (conversionsByChannel.get(channel) ?? 0) + weight);
+      if (journey.dealValue !== null && journey.dealCurrency) {
+        const byCurrency = revenueByChannel.get(channel) ?? new Map<string, number>();
+        byCurrency.set(journey.dealCurrency, (byCurrency.get(journey.dealCurrency) ?? 0) + weight * journey.dealValue);
+        revenueByChannel.set(channel, byCurrency);
+      }
+    });
+  }
+
+  return Array.from(conversionsByChannel.entries())
+    .map(([channel, creditedConversions]) => ({
+      channel,
+      // Rounded to 2dp purely for display — the underlying math isn't
+      // lossy, this just avoids showing "1.5000000000000002" from
+      // ordinary floating-point accumulation.
+      creditedConversions: Math.round(creditedConversions * 100) / 100,
+      creditedRevenue: revenueMapToObject(revenueByChannel.get(channel)),
+    }))
+    .sort((a, b) => b.creditedConversions - a.creditedConversions);
+}
+
+const NOTABLE_CHANGE_THRESHOLD = 0.3; // 30%+ change to be worth surfacing
+const NOTABLE_CHANGE_MIN_BASELINE = 3; // last week's count must be at least this — otherwise a jump from 1→3 touchpoints reads as a dramatic "200% increase" that's really just noise
+
+/**
+ * Compares this week's touchpoint volume against last week's, per
+ * source, and surfaces anything that moved by more than 30% — e.g.
+ * "facebook touchpoint volume dropped 40% this week (12 → 7)". Scoped
+ * to SOURCE specifically (not channel or campaign) since that's the
+ * dimension a person is most likely to act on ("did we cut Facebook
+ * budget" is actionable in a way "did website_visit channel drop" —
+ * mixing every source together — usually isn't).
+ *
+ * Requires at least NOTABLE_CHANGE_MIN_BASELINE touchpoints in the
+ * PRIOR week specifically — without this, a source going from 1
+ * touchpoint to 3 would read as a dramatic "200% increase" that's
+ * really just noise from a tiny sample. A brand-new source with zero
+ * prior-week history never gets flagged either, for the same reason
+ * (nothing to meaningfully compare against yet).
+ */
+function computeNotableChanges(touchpoints: Touchpoint[]): NotableChange[] {
+  const now = new Date();
+  const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+
+  const thisWeekBySource = new Map<string, number>();
+  const lastWeekBySource = new Map<string, number>();
+  for (const tp of touchpoints) {
+    if (!tp.source) continue;
+    if (tp.occurredAt >= oneWeekAgo && tp.occurredAt <= now) {
+      thisWeekBySource.set(tp.source, (thisWeekBySource.get(tp.source) ?? 0) + 1);
+    } else if (tp.occurredAt >= twoWeeksAgo && tp.occurredAt < oneWeekAgo) {
+      lastWeekBySource.set(tp.source, (lastWeekBySource.get(tp.source) ?? 0) + 1);
+    }
+  }
+
+  const withMagnitude: { text: string; direction: "increase" | "decrease"; magnitude: number }[] = [];
+  const allSources = new Set([...thisWeekBySource.keys(), ...lastWeekBySource.keys()]);
+  for (const source of allSources) {
+    const thisWeek = thisWeekBySource.get(source) ?? 0;
+    const lastWeek = lastWeekBySource.get(source) ?? 0;
+    if (lastWeek < NOTABLE_CHANGE_MIN_BASELINE) continue;
+    const change = (thisWeek - lastWeek) / lastWeek;
+    if (Math.abs(change) < NOTABLE_CHANGE_THRESHOLD) continue;
+    const pct = Math.round(Math.abs(change) * 100);
+    const direction: "increase" | "decrease" = change > 0 ? "increase" : "decrease";
+    withMagnitude.push({
+      text: `${source} touchpoint volume ${direction === "increase" ? "increased" : "dropped"} ${pct}% this week (${lastWeek} → ${thisWeek})`,
+      direction,
+      magnitude: Math.abs(change),
+    });
+  }
+  return withMagnitude.sort((a, b) => b.magnitude - a.magnitude).map(({ text, direction }) => ({ text, direction }));
 }
 
 const TOUCHPOINTS_BY_DAY_WINDOW_DAYS = 30;
@@ -685,6 +874,7 @@ export function buildPortalSummary(
   const assistedConversionCounts = new Map<string, number>(); // channel label -> how many WON identities had it appear anywhere in their journey
   let totalWonForAssists = 0;
   const stageBySourceCounts = new Map<string, Map<string, number>>(); // firstTouchSource -> stageName -> count of OPEN deals currently in that stage
+  const wonJourneys: { touchpoints: Touchpoint[]; dealValue: number | null; dealCurrency: string | null; dealWonAt: Date | null }[] = [];
   let leadCreatedCount = 0;
   let dealCreatedCount = 0;
   let wonCount = 0;
@@ -853,6 +1043,15 @@ export function buildPortalSummary(
       stageBySourceCounts.set(summary.firstTouchSource, bySource);
     }
 
+    // Multi-touch attribution — same population as assistedConversions
+    // (every Won identity's full touchpoint list), but this one splits
+    // credit rather than just noting presence. Collected here, weighted
+    // and aggregated once at the end for all three models — see
+    // computeMultiTouchAttribution's own doc comment.
+    if (identity.wonDealId !== null) {
+      wonJourneys.push({ touchpoints: tps, dealValue: identity.dealValue, dealCurrency: identity.dealCurrency, dealWonAt: identity.dealWonAt });
+    }
+
     // Conversion trend — which week bucket this identity's first touch
     // falls into, using CURRENT converted state (see
     // ConversionTrendWeek's doc comment on why that's an intentional,
@@ -961,6 +1160,17 @@ export function buildPortalSummary(
         const totalB = b.stages.reduce((sum, s) => sum + s.count, 0);
         return totalB - totalA;
       }),
+    multiTouchAttribution: {
+      linear: computeMultiTouchAttribution(wonJourneys, "linear"),
+      timeDecay: computeMultiTouchAttribution(wonJourneys, "time_decay"),
+      uShaped: computeMultiTouchAttribution(wonJourneys, "u_shaped"),
+    },
+    // Full, unfiltered touchpoints — same "always the whole picture,
+    // regardless of the current UTM filter" convention as
+    // distinctUtmValues. A week-over-week volume comparison narrowed to
+    // whatever filter happens to be active would mostly just reflect
+    // the filter itself, not a real change worth surfacing.
+    notableChanges: computeNotableChanges(touchpoints),
     distinctUtmValues,
   };
 }

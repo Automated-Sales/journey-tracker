@@ -316,30 +316,60 @@ portalRouter.post("/api/settings/visit-logging", requireSession, requireActiveBi
  * Stage 2 of the lead-source-field feature (Stage 1 was the CLI script,
  * set-tenant-lead-source-field.ts — still works, this is the same thing
  * through the dashboard instead). See db.ts's Tenant interface doc
- * comment on leadSourceFieldKey for the full reasoning.
+ * comment on leadSourceFields for the full reasoning — an ORDERED LIST
+ * of fields, checked in priority order, not just one, and now spanning
+ * BOTH Person and Deal/Lead fields (a client's relevant field can live
+ * on either entity — confirmed live for Johari).
  *
- * Fetches the tenant's Lead/Deal field list live from Pipedrive on every
- * load (not cached) — this is a settings page someone visits rarely, and
- * a field a client added yesterday should show up immediately rather
- * than waiting on some cache to expire.
+ * Fetches the tenant's Person + Deal field list live from Pipedrive on
+ * every load (not cached) — this is a settings page someone visits
+ * rarely, and a field a client added yesterday should show up
+ * immediately rather than waiting on some cache to expire.
  */
+// Shared by both lead-source-field and segment-field settings routes —
+// merges Person + Deal/Lead fields into one list, each option's key
+// prefixed with which entity it came from ("person::<rawkey>" /
+// "deal::<rawkey>") so two fields that happen to share a raw key
+// (confirmed to happen for BUILT-IN fields like Label — see
+// listSegmentableFields's own doc comment) can never be ambiguous, even
+// though a collision between two REGULAR custom fields is unlikely.
+async function listEntityPrefixedFields(
+  token: string
+): Promise<{ compositeKey: string; entity: "person" | "deal"; rawKey: string; name: string; options: any }[]> {
+  const [personFields, dealFields] = await Promise.all([listPersonFields(token), listDealFields(token)]);
+  const named = (fields: any[], entityPrefix: "person" | "deal", suffix: string) =>
+    fields
+      .filter((f: any) => typeof f.name === "string" && typeof f.key === "string")
+      .map((f: any) => ({
+        compositeKey: `${entityPrefix}::${f.key}`,
+        entity: entityPrefix,
+        rawKey: f.key,
+        name: `${f.name} (${suffix})`,
+        options: f.options,
+      }));
+  return [...named(personFields, "person", "Person"), ...named(dealFields, "deal", "Deal/Lead")].sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
+}
+
 portalRouter.get("/api/settings/lead-source-field", requireSession, requireActiveBilling, async (req, res) => {
   const tenant = req.portalTenant!;
-  const current = tenant.leadSourceFieldKey
-    ? { key: tenant.leadSourceFieldKey, name: tenant.leadSourceFieldLabel }
-    : null;
+  let current: { key: string; name: string }[] = [];
+  try {
+    current = tenant.leadSourceFields
+      ? JSON.parse(tenant.leadSourceFields).map((f: any) => ({ key: `${f.entity || "deal"}::${f.key}`, name: f.label }))
+      : [];
+  } catch {
+    current = [];
+  }
 
   if (!tenant.pipedriveApiToken) {
     return res.json({ current, fields: [], error: "No Pipedrive API token configured for this tenant yet." });
   }
 
   try {
-    const fields = await listDealFields(tenant.pipedriveApiToken);
-    const options = fields
-      .filter((f: any) => typeof f.name === "string" && typeof f.key === "string")
-      .map((f: any) => ({ key: f.key, name: f.name }))
-      .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name));
-    res.json({ current, fields: options });
+    const fields = await listEntityPrefixedFields(tenant.pipedriveApiToken);
+    res.json({ current, fields: fields.map((f) => ({ key: f.compositeKey, name: f.name })) });
   } catch (err: any) {
     console.error(`[settings] failed to list Pipedrive fields for tenant ${tenant.id}:`, err);
     res.status(502).json({ current, fields: [], error: "Couldn't fetch fields from Pipedrive — check the API token is still valid." });
@@ -347,18 +377,20 @@ portalRouter.get("/api/settings/lead-source-field", requireSession, requireActiv
 });
 
 /**
- * Re-validates the chosen key against Pipedrive's live field list before
- * saving (rather than trusting whatever the client sent) — cheap
+ * Re-validates every chosen key against Pipedrive's live field list
+ * before saving (rather than trusting whatever the client sent) — cheap
  * insurance against saving a stale reference to a field a client renamed
- * or deleted between page load and clicking Save.
+ * or deleted between page load and clicking Save. Order in the request
+ * body IS the priority order — the first field with a value on an
+ * incoming webhook wins (see webhooks.ts's applyLeadSourceFallback).
  */
 portalRouter.post("/api/settings/lead-source-field", requireSession, requireActiveBilling, async (req, res) => {
   const tenant = req.portalTenant!;
-  const key = req.body?.key;
+  const compositeKeys: unknown = req.body?.keys;
 
-  if (!key) {
-    await db.tenant.updateLeadSourceField(tenant.id, { leadSourceFieldKey: null, leadSourceFieldLabel: null, leadSourceFieldOptions: null });
-    return res.json({ ok: true, current: null });
+  if (!Array.isArray(compositeKeys) || compositeKeys.length === 0) {
+    await db.tenant.updateLeadSourceFields(tenant.id, null);
+    return res.json({ ok: true, current: [] });
   }
 
   if (!tenant.pipedriveApiToken) {
@@ -366,27 +398,25 @@ portalRouter.post("/api/settings/lead-source-field", requireSession, requireActi
   }
 
   try {
-    const fields = await listDealFields(tenant.pipedriveApiToken);
-    const match = fields.find((f: any) => f.key === key);
-    if (!match) {
-      return res.status(400).json({ error: "That field no longer exists in Pipedrive — refresh the page and try again." });
+    const fields = await listEntityPrefixedFields(tenant.pipedriveApiToken);
+    const resolved: { key: string; label: string; entity: "person" | "deal"; options: { id: string; name: string }[] }[] = [];
+    for (const compositeKey of compositeKeys) {
+      const match = fields.find((f) => f.compositeKey === compositeKey);
+      if (!match) {
+        return res.status(400).json({ error: "One of those fields no longer exists in Pipedrive — refresh the page and try again." });
+      }
+      // Same lesson as the segment field: not every configured field is
+      // plain text (Johari's original "Social Form Source" was, but a
+      // single-select field like "Lead Source" isn't) — capture
+      // options here too so the fallback can resolve one if needed.
+      const options = Array.isArray(match.options) ? match.options.map((o: any) => ({ id: String(o.id), name: String(o.label) })) : [];
+      resolved.push({ key: match.rawKey, label: match.name, entity: match.entity, options });
     }
-    // Same lesson as the segment field: not every configured field is
-    // plain text (Johari's original "Social Form Source" was, but
-    // there's nothing stopping a client from picking a single-select
-    // field instead, whose webhook value is a raw option ID, not
-    // display text) — capture options here too so the fallback can
-    // resolve one if needed.
-    const options = Array.isArray(match.options) ? match.options.map((o: any) => ({ id: String(o.id), name: String(o.label) })) : [];
-    await db.tenant.updateLeadSourceField(tenant.id, {
-      leadSourceFieldKey: match.key,
-      leadSourceFieldLabel: match.name,
-      leadSourceFieldOptions: options.length ? JSON.stringify(options) : null,
-    });
-    res.json({ ok: true, current: { key: match.key, name: match.name } });
+    await db.tenant.updateLeadSourceFields(tenant.id, JSON.stringify(resolved));
+    res.json({ ok: true, current: resolved.map((f) => ({ key: `${f.entity}::${f.key}`, name: f.label })) });
   } catch (err: any) {
-    console.error(`[settings] failed to save lead-source field for tenant ${tenant.id}:`, err);
-    res.status(502).json({ error: "Couldn't verify that field against Pipedrive — try again." });
+    console.error(`[settings] failed to save lead-source fields for tenant ${tenant.id}:`, err);
+    res.status(502).json({ error: "Couldn't verify those fields against Pipedrive — try again." });
   }
 });
 
@@ -626,6 +656,7 @@ function parseUtmFilterQuery(req: Request): UtmFilter {
   if (req.query.utm_term) filter.term = String(req.query.utm_term);
   if (req.query.utm_content) filter.content = String(req.query.utm_content);
   if (req.query.segment) filter.segment = String(req.query.segment);
+  if (req.query.channel) filter.channel = String(req.query.channel);
   return filter;
 }
 

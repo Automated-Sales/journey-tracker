@@ -137,13 +137,22 @@
     <div class="as-card as-install-card" style="margin-bottom:28px;">
       <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Lead source fallback</h3>
       <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
-        For leads that never visit your website at all — e.g. someone who fills out a native Facebook Lead Form that a tool like WhatConverts or Zapier pushes straight into Pipedrive — there's no tracked journey to show. If one of your Pipedrive Lead fields already captures where those came from, pick it below and it'll be used as that contact's first-touch source, but only when they have no other tracked activity at all. It never overrides real tracked data.
+        For leads that never visit your website at all — e.g. someone who fills out a native Facebook Lead Form that a tool like WhatConverts or Zapier pushes straight into Pipedrive — there's no tracked journey to show. If your Pipedrive Leads already capture where those came from, add the field(s) below and they'll be used as that contact's first-touch source, but only when they have no other tracked activity at all. It never overrides real tracked data.
+      </p>
+      <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
+        Add more than one if different intake channels use different fields (e.g. a web form vs. WhatsApp) — they're checked in order, top to bottom, and the first one with a value on a given lead wins.
       </p>
       <div id="lead-source-field-loading" style="font-size:13px; color:var(--as-body);">Loading your Pipedrive fields…</div>
-      <div id="lead-source-field-controls" style="display:none; align-items:center; gap:12px; flex-wrap:wrap;">
-        <select id="lead-source-field-select" class="as-select"></select>
-        <button class="as-btn as-btn-primary" id="lead-source-field-save">Save</button>
-        <span id="lead-source-field-status" style="font-size:13px; color:var(--as-body);"></span>
+      <div id="lead-source-field-controls" style="display:none;">
+        <div id="lead-source-fields-list" style="margin-bottom:12px;"></div>
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+          <select id="lead-source-field-add-select" class="as-select"></select>
+          <button class="as-btn as-btn-outline" id="lead-source-field-add-btn">Add field</button>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:16px;">
+          <button class="as-btn as-btn-primary" id="lead-source-field-save">Save</button>
+          <span id="lead-source-field-status" style="font-size:13px; color:var(--as-body);"></span>
+        </div>
       </div>
     </div>
 
@@ -215,6 +224,8 @@
 
     <div data-section="reports">
 
+    <div id="notable-changes" style="display:none; margin-bottom:20px;"></div>
+
     <div class="as-stat-grid">
       <div class="as-stat-card">
         <div class="num" id="stat-identities">–</div>
@@ -238,6 +249,7 @@
       <p style="color:var(--as-body); font-size:12.5px; margin:0 0 14px;">Narrows every report below (and the drill-down popups) to prospects whose first touch matches — leave any of these on "All" to ignore it.</p>
       <div class="as-utm-filter-grid">
         <label class="as-utm-filter-field">Source<select id="utm-filter-source" class="as-select"><option value="">All</option></select></label>
+        <label class="as-utm-filter-field">Channel<select id="utm-filter-channel" class="as-select"><option value="">All</option></select></label>
         <label class="as-utm-filter-field">Medium<select id="utm-filter-medium" class="as-select"><option value="">All</option></select></label>
         <label class="as-utm-filter-field">Campaign<select id="utm-filter-campaign" class="as-select"><option value="">All</option></select></label>
         <label class="as-utm-filter-field">Term<select id="utm-filter-term" class="as-select"><option value="">All</option></select></label>
@@ -316,6 +328,12 @@
       <div id="deal-stage-by-source"></div>
     </div>
 
+    <div class="as-card" id="multi-touch-attribution-card" style="margin-bottom:20px; display:none;">
+      <p class="as-panel-title">Multi-touch attribution</p>
+      <p style="color:var(--as-body); font-size:12.5px; margin:0 0 16px;">See how much of your Won revenue each channel actually helped bring in, not just which one happened to be the first or last touch. Every deal's full value is shared across everything in its journey, so the numbers below always add up to exactly your real Won revenue.</p>
+      <div id="multi-touch-attribution"></div>
+    </div>
+
     <div class="as-card">
       <div class="as-panel-head">
         <p class="as-panel-title">Recently active prospects</p>
@@ -387,6 +405,7 @@
     if (currentUtmFilter.term) params.set('utm_term', currentUtmFilter.term);
     if (currentUtmFilter.content) params.set('utm_content', currentUtmFilter.content);
     if (currentUtmFilter.segment) params.set('segment', currentUtmFilter.segment);
+    if (currentUtmFilter.channel) params.set('channel', currentUtmFilter.channel);
     return params;
   }
 
@@ -413,6 +432,7 @@
       { id: 'utm-filter-campaign', options: distinct.campaigns },
       { id: 'utm-filter-term', options: distinct.terms },
       { id: 'utm-filter-content', options: distinct.contents },
+      { id: 'utm-filter-channel', options: distinct.channels },
     ].forEach(function (f) {
       var select = document.getElementById(f.id);
       if (!select) return;
@@ -701,6 +721,136 @@
       .join('');
 
     container.innerHTML = '<div class="as-table-scroll"><table class="as-table as-conversion-table"><thead>' + theadHtml + '</thead><tbody>' + bodyHtml + '</tbody></table></div>';
+  }
+
+  // Persisted across re-renders (not just per-card-instance state) so
+  // switching models, then triggering an unrelated refreshReports()
+  // call (e.g. changing the UTM filter bar), doesn't silently reset the
+  // model back to Linear.
+  var mtaModel = 'linear';
+  var MTA_MODEL_LABELS = { linear: 'Linear', timeDecay: 'Time-decay', uShaped: 'U-shaped' };
+
+  // Deliberately its own top-level callout, not a card among the
+  // others — the whole point is to be the first thing noticed, not
+  // something that has to be scrolled to. Hidden entirely when there's
+  // nothing notable (no "all quiet" filler message — silence itself is
+  // the signal that nothing needs attention).
+  function renderNotableChanges(container, changes) {
+    if (!changes.length) {
+      container.style.display = 'none';
+      container.innerHTML = '';
+      return;
+    }
+    container.style.display = 'block';
+    container.innerHTML = changes
+      .map(function (c) {
+        var isIncrease = c.direction === 'increase';
+        return (
+          '<div class="as-notable-change' + (isIncrease ? ' as-notable-increase' : ' as-notable-decrease') + '">' +
+          '<span class="as-notable-arrow">' + (isIncrease ? '▲' : '▼') + '</span> ' +
+          esc(c.text) +
+          '</div>'
+        );
+      })
+      .join('');
+  }
+
+  var MTA_MODEL_DESCRIPTIONS = {
+    linear: 'Every touchpoint in the journey gets equal credit.',
+    timeDecay: 'Touchpoints closer to when the deal closed get more credit than earlier ones.',
+    uShaped: 'The first and last touchpoints each get 40% credit; everything in between splits the remaining 20%.',
+  };
+
+  // Compact notation ("€487K"), not formatRevenue's exact-to-the-unit
+  // style used everywhere else on this dashboard — deliberately
+  // different here, since these figures are a MODELED split of a real
+  // deal value, not a literal recorded amount, so showing "€487,013"
+  // implies a precision that doesn't really apply. The % share next to
+  // it (already exact) carries the precise information; this number is
+  // just for a quick sense of scale.
+  function formatRevenueCompact(wonRevenue) {
+    var currencies = Object.keys(wonRevenue || {});
+    if (!currencies.length) return '—';
+    return currencies
+      .map(function (c) {
+        var symbol = CURRENCY_SYMBOLS[c] || c + ' ';
+        return symbol + new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(wonRevenue[c]);
+      })
+      .join(' + ');
+  }
+
+  function renderMultiTouchAttribution(container, data) {
+    var rows = data[mtaModel];
+    var toggleHtml =
+      '<div class="as-sort-toggle">' +
+      '<span class="as-sort-toggle-label">Model:</span>' +
+      Object.keys(MTA_MODEL_LABELS)
+        .map(function (m) {
+          return (
+            '<button type="button" class="as-sort-btn' +
+            (mtaModel === m ? ' as-sort-btn-active' : '') +
+            '" data-model="' + m + '">' +
+            MTA_MODEL_LABELS[m] +
+            '</button>'
+          );
+        })
+        .join('') +
+      '</div>' +
+      '<p style="color:var(--as-body); font-size:12.5px; margin:10px 0 16px;">' + esc(MTA_MODEL_DESCRIPTIONS[mtaModel]) + '</p>';
+
+    if (!rows.length) {
+      container.innerHTML = toggleHtml + '<div class="as-empty">No Won deals yet.</div>';
+      wireModelToggle();
+      return;
+    }
+
+    // Total per currency across every row, so each channel can show its
+    // share as a plain percentage of Won revenue — far more intuitive
+    // than the raw underlying "credited conversions" number, which
+    // means nothing without first explaining the whole model.
+    var totalsByCurrency = {};
+    rows.forEach(function (r) {
+      Object.keys(r.creditedRevenue || {}).forEach(function (c) {
+        totalsByCurrency[c] = (totalsByCurrency[c] || 0) + r.creditedRevenue[c];
+      });
+    });
+
+    var max = rows.reduce(function (m, r) { return Math.max(m, r.creditedConversions); }, 0);
+    container.innerHTML =
+      toggleHtml +
+      rows
+        .map(function (r) {
+          var widthPct = max > 0 ? Math.max(4, (r.creditedConversions / max) * 100) : 0;
+          var currencies = Object.keys(r.creditedRevenue || {});
+          var shareText = currencies.length
+            ? currencies
+                .map(function (c) {
+                  var pct = totalsByCurrency[c] > 0 ? Math.round((r.creditedRevenue[c] / totalsByCurrency[c]) * 100) : 0;
+                  return pct + '%';
+                })
+                .join(' / ') + ' of Won revenue'
+            : 'no captured deal value'; // a Won deal with no dealValue still contributes here, just with nothing to show a % of
+          return (
+            '<div class="as-bar-row">' +
+            '<div class="as-bar-label" title="' + esc(r.channel) + '">' + esc(r.channel) + '</div>' +
+            '<div class="as-bar-track"><div class="as-bar-fill" style="width:' + widthPct + '%"></div></div>' +
+            '<div class="as-bar-count">' +
+            esc(formatRevenueCompact(r.creditedRevenue)) +
+            ' <span style="color:var(--as-body); font-weight:600;">(' + esc(shareText) + ')</span></div>' +
+            '</div>'
+          );
+        })
+        .join('');
+    wireModelToggle();
+
+    function wireModelToggle() {
+      container.querySelectorAll('[data-model]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          mtaModel = btn.getAttribute('data-model');
+          renderMultiTouchAttribution(container, data);
+        });
+      });
+    }
   }
 
   function renderConversionTable(container, rows, keyName, emptyMessage, filterValueKey) {
@@ -1353,11 +1503,65 @@
   // the dropdown — a genuine network round trip (unlike renderVisitLogging
   // above, whose three options are hardcoded), so this has its own
   // loading/error states rather than assuming the data's already there.
+  //
+  // Ordered-list UI: selectedFields is local, editable client-side state
+  // (add/reorder/remove), only sent to the server when Save is clicked —
+  // avoids a flurry of API calls for every small reorder.
   function renderLeadSourceFieldSettings() {
     var loading = document.getElementById('lead-source-field-loading');
     var controls = document.getElementById('lead-source-field-controls');
-    var select = document.getElementById('lead-source-field-select');
+    var listEl = document.getElementById('lead-source-fields-list');
+    var addSelect = document.getElementById('lead-source-field-add-select');
     var status = document.getElementById('lead-source-field-status');
+    var allFields = [];
+    var selectedFields = [];
+
+    function renderList() {
+      if (!selectedFields.length) {
+        listEl.innerHTML = '<div style="color:var(--as-body); font-size:13px;">No fallback fields configured — this feature is off.</div>';
+      } else {
+        listEl.innerHTML = selectedFields
+          .map(function (f, i) {
+            return (
+              '<div style="display:flex; align-items:center; gap:8px; padding:8px 12px; border:1px solid var(--as-border); border-radius:10px; margin-bottom:6px;">' +
+              '<span style="color:var(--as-body); font-size:12px; font-weight:700; width:16px;">' + (i + 1) + '.</span>' +
+              '<span style="flex:1; font-size:13.5px; font-weight:600;">' + esc(f.name) + '</span>' +
+              '<button type="button" class="as-btn-text" data-action="up" data-i="' + i + '" title="Move up"' + (i === 0 ? ' disabled style="opacity:0.3;"' : '') + '>▲</button>' +
+              '<button type="button" class="as-btn-text" data-action="down" data-i="' + i + '" title="Move down"' + (i === selectedFields.length - 1 ? ' disabled style="opacity:0.3;"' : '') + '>▼</button>' +
+              '<button type="button" class="as-btn-text" data-action="remove" data-i="' + i + '" title="Remove" style="color:#a13d2f;">✕</button>' +
+              '</div>'
+            );
+          })
+          .join('');
+        listEl.querySelectorAll('[data-action]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var i = parseInt(btn.getAttribute('data-i'), 10);
+            var action = btn.getAttribute('data-action');
+            if (action === 'up' && i > 0) {
+              var tmp = selectedFields[i - 1];
+              selectedFields[i - 1] = selectedFields[i];
+              selectedFields[i] = tmp;
+            } else if (action === 'down' && i < selectedFields.length - 1) {
+              var tmp2 = selectedFields[i + 1];
+              selectedFields[i + 1] = selectedFields[i];
+              selectedFields[i] = tmp2;
+            } else if (action === 'remove') {
+              selectedFields.splice(i, 1);
+            }
+            renderList();
+            renderAddSelect();
+          });
+        });
+      }
+    }
+
+    function renderAddSelect() {
+      var selectedKeys = selectedFields.map(function (f) { return f.key; });
+      var available = allFields.filter(function (f) { return selectedKeys.indexOf(f.key) === -1; });
+      addSelect.innerHTML =
+        '<option value="">Choose a field to add…</option>' +
+        available.map(function (f) { return '<option value="' + esc(f.key) + '">' + esc(f.name) + '</option>'; }).join('');
+    }
 
     fetch('/api/settings/lead-source-field', { credentials: 'include' })
       .then(function (r) { return r.json(); })
@@ -1368,13 +1572,21 @@
           loading.textContent = data.error;
           return;
         }
-        controls.style.display = 'flex';
-        var optionsHtml = '<option value="">— None (off) —</option>' +
-          data.fields.map(function (f) {
-            var selected = data.current && data.current.key === f.key ? ' selected' : '';
-            return '<option value="' + esc(f.key) + '"' + selected + '>' + esc(f.name) + '</option>';
-          }).join('');
-        select.innerHTML = optionsHtml;
+        controls.style.display = 'block';
+        allFields = data.fields;
+        selectedFields = (data.current || []).slice();
+        renderList();
+        renderAddSelect();
+
+        document.getElementById('lead-source-field-add-btn').addEventListener('click', function () {
+          var key = addSelect.value;
+          if (!key) return;
+          var field = allFields.find(function (f) { return f.key === key; });
+          if (!field) return;
+          selectedFields.push(field);
+          renderList();
+          renderAddSelect();
+        });
 
         document.getElementById('lead-source-field-save').addEventListener('click', function () {
           status.textContent = 'Saving…';
@@ -1382,7 +1594,7 @@
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: select.value || null }),
+            body: JSON.stringify({ keys: selectedFields.map(function (f) { return f.key; }) }),
           })
             .then(function (r) { return r.ok ? r.json() : r.json().then(function (e) { throw new Error(e.error || 'failed'); }); })
             .then(function () {
@@ -1562,6 +1774,8 @@
     }
     var s = await summaryRes.json();
 
+    renderNotableChanges(document.getElementById('notable-changes'), s.notableChanges);
+
     document.getElementById('stat-identities').textContent = s.identifiedIdentities;
     document.getElementById('stat-touchpoints').textContent = s.totalTouchpoints;
     document.getElementById('stat-total').textContent = s.totalIdentities;
@@ -1606,6 +1820,14 @@
       renderDealStageBySource(document.getElementById('deal-stage-by-source'), s.dealStageBySource);
     } else {
       stageCard.style.display = 'none';
+    }
+
+    var mtaCard = document.getElementById('multi-touch-attribution-card');
+    if (s.multiTouchAttribution.linear.length) {
+      mtaCard.style.display = 'block';
+      renderMultiTouchAttribution(document.getElementById('multi-touch-attribution'), s.multiTouchAttribution);
+    } else {
+      mtaCard.style.display = 'none';
     }
 
     // Recently active prospects is deliberately NOT rendered from
@@ -1667,7 +1889,7 @@
     }
   }
 
-  ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content', 'utm-filter-segment'].forEach(function (id) {
+  ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content', 'utm-filter-channel', 'utm-filter-segment'].forEach(function (id) {
     document.getElementById(id).addEventListener('change', function (event) {
       var key = id.replace('utm-filter-', '');
       if (event.target.value) currentUtmFilter[key] = event.target.value;
@@ -1679,7 +1901,7 @@
 
   document.getElementById('utm-filter-clear').addEventListener('click', function () {
     currentUtmFilter = {};
-    ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content', 'utm-filter-segment'].forEach(function (id) {
+    ['utm-filter-source', 'utm-filter-medium', 'utm-filter-campaign', 'utm-filter-term', 'utm-filter-content', 'utm-filter-channel', 'utm-filter-segment'].forEach(function (id) {
       document.getElementById(id).value = '';
     });
     refreshReports();

@@ -215,9 +215,10 @@ async function init() {
   // See the Tenant interface's doc comment above these two fields for
   // the fuller reasoning — a per-tenant fallback source for leads our
   // own tracking never saw.
-  ensureColumn("tenants", "leadSourceFieldKey", "TEXT");
+  ensureColumn("tenants", "leadSourceFieldKey", "TEXT"); // legacy single-field columns — kept only so an existing tenant's config can be migrated forward (see migrateLegacyLeadSourceField below), never written to by new code
   ensureColumn("tenants", "leadSourceFieldLabel", "TEXT");
   ensureColumn("tenants", "leadSourceFieldOptions", "TEXT");
+  ensureColumn("tenants", "leadSourceFields", "TEXT");
   ensureColumn("tenants", "segmentFieldKey", "TEXT");
   ensureColumn("tenants", "segmentFieldLabel", "TEXT");
   ensureColumn("tenants", "segmentFieldOptions", "TEXT");
@@ -275,31 +276,33 @@ export interface Tenant {
   trialEndsAt: Date | null;
   currentPeriodEnd: Date | null;
   createdAt: Date;
-  // Optional per-tenant fallback attribution source — configured via
-  // Stage 2's settings page (not yet built; for now, set via
-  // set-tenant-lead-source-field.ts). When a Lead webhook arrives for an
-  // identity with NO existing touchpoints at all (see webhooks.ts's
-  // "lead" handler), the value of this Pipedrive Lead/Deal custom field
-  // — read straight off the webhook payload, no extra API call needed —
-  // becomes that identity's one and only first-touch source. This never
-  // overrides real tracked data; it only fills the gap for a lead that
-  // came in through a channel our own tracking snippet could never see
-  // (e.g. a native Facebook Lead Form feeding Pipedrive through a
-  // third-party tool like WhatConverts, with no website visit at all).
-  // leadSourceFieldKey is the raw Pipedrive field key (the long hash);
-  // leadSourceFieldLabel is the human-readable name, stored purely for
-  // display (e.g. on a future settings page showing "currently mapped:
-  // Social Form Source") — never used for matching/lookup.
-  leadSourceFieldKey: string | null;
-  leadSourceFieldLabel: string | null;
-  // Same "id -> readable name" resolution segmentFieldOptions already
-  // does — needed because the chosen field isn't always plain text
-  // (Johari's "Social Form Source" was, but a single-select/enum field
-  // like "Lead Source" sends a raw option ID on the webhook payload,
-  // not the display text). Null when the field genuinely IS plain text
-  // (no options to resolve — the raw captured value already IS the
-  // readable value in that case).
-  leadSourceFieldOptions: string | null;
+  // Ordered list of fallback fields — checked in priority order, first
+  // one with a real value on the incoming Lead/Deal/Person webhook
+  // wins. Replaces an earlier single-field design after discovering a
+  // single Pipedrive account can genuinely use DIFFERENT fields to
+  // record source depending on how a lead came in — Johari's own uses
+  // "Social Form Source" for web-form leads but a separate "Lead
+  // Source" field for WhatsApp-originated ones — and can spread those
+  // fields across DIFFERENT entities too: Person and Deal/Lead are
+  // separate field namespaces in Pipedrive (same lesson learned via
+  // segmentFieldKey below — a client's relevant field might live on
+  // either one).
+  //
+  // JSON-encoded array of { key, label, entity, options }:
+  //   key    — the raw Pipedrive field key (the long hash)
+  //   label  — human-readable name, for display only (settings page,
+  //            touchpoint titles) — never used for matching/lookup
+  //   entity — "person" or "deal" (Leads share Deal's field namespace,
+  //            same convention as segmentFieldKey) — which webhook
+  //            handler this field's value can actually be read off
+  //   options — same "id -> readable name" resolution segmentFieldOptions
+  //            does, needed because the chosen field isn't always plain
+  //            text (Johari's "Social Form Source" was, but a
+  //            single-select/enum field like "Lead Source" sends a raw
+  //            option ID on the webhook payload, not the display text).
+  //            Empty array when the field genuinely IS plain text.
+  // Null (not an empty array) when no fallback is configured at all.
+  leadSourceFields: string | null;
   // A DIFFERENT per-tenant field mapping — generalizes Johari's specific
   // need (segmenting enquiries by Pipedrive Label, e.g. "which product
   // is this enquiry for") into something any tenant can configure for
@@ -481,6 +484,24 @@ function queryAll(sql: string, params: any[]): any[] {
   return rows;
 }
 
+// One-time, read-time migration: a tenant configured under the old
+// single-field design (leadSourceFieldKey/Label/Options columns, still
+// present in the DB purely for this) gets seamlessly promoted into a
+// 1-item priority list the first time its row is read after this
+// change — no manual reconfiguration needed, and a second field can
+// then be added via the settings page whenever useful. Returns null
+// (not an empty array) when there's nothing to migrate.
+function migrateLegacyLeadSourceField(row: any): string | null {
+  if (!row.leadSourceFieldKey) return null;
+  let options: unknown = [];
+  try {
+    options = row.leadSourceFieldOptions ? JSON.parse(row.leadSourceFieldOptions) : [];
+  } catch {
+    options = [];
+  }
+  return JSON.stringify([{ key: row.leadSourceFieldKey, label: row.leadSourceFieldLabel || row.leadSourceFieldKey, entity: "deal", options }]);
+}
+
 function rowToTenant(row: any): Tenant | null {
   if (!row) return null;
   return {
@@ -511,9 +532,7 @@ function rowToTenant(row: any): Tenant | null {
     trialEndsAt: row.trialEndsAt ? new Date(row.trialEndsAt) : null,
     currentPeriodEnd: row.currentPeriodEnd ? new Date(row.currentPeriodEnd) : null,
     createdAt: new Date(row.createdAt),
-    leadSourceFieldKey: row.leadSourceFieldKey ?? null,
-    leadSourceFieldLabel: row.leadSourceFieldLabel ?? null,
-    leadSourceFieldOptions: row.leadSourceFieldOptions ?? null,
+    leadSourceFields: row.leadSourceFields ?? migrateLegacyLeadSourceField(row),
     segmentFieldKey: row.segmentFieldKey ?? null,
     segmentFieldLabel: row.segmentFieldLabel ?? null,
     segmentFieldOptions: row.segmentFieldOptions ?? null,
@@ -739,19 +758,17 @@ export const db = {
     // set-tenant-lead-source-field.ts (Stage 1); a future settings page
     // (Stage 2) will call this same method from an authenticated route
     // instead of a CLI script.
-    updateLeadSourceField(
-      id: string,
-      data: { leadSourceFieldKey: string | null; leadSourceFieldLabel: string | null; leadSourceFieldOptions: string | null }
-    ) {
+    updateLeadSourceFields(id: string, leadSourceFields: string | null) {
       return withDb(() => {
         const existing = queryOne("SELECT * FROM tenants WHERE id = ?", [id]);
         if (!existing) throw new Error(`Tenant ${id} not found`);
-        sqlite.run("UPDATE tenants SET leadSourceFieldKey = ?, leadSourceFieldLabel = ?, leadSourceFieldOptions = ? WHERE id = ?", [
-          data.leadSourceFieldKey,
-          data.leadSourceFieldLabel,
-          data.leadSourceFieldOptions,
-          id,
-        ]);
+        // Also clears the legacy columns — once a tenant saves through
+        // the new multi-field UI, the old single-field data would
+        // otherwise sit there stale and unused forever.
+        sqlite.run(
+          "UPDATE tenants SET leadSourceFields = ?, leadSourceFieldKey = NULL, leadSourceFieldLabel = NULL, leadSourceFieldOptions = NULL WHERE id = ?",
+          [leadSourceFields, id]
+        );
         persist();
       });
     },

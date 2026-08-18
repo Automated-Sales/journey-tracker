@@ -348,6 +348,90 @@ async function main() {
     "assistedConversions: wonRate is relative to total WON identities (1), not total identities (2) — idB never converted, so it shouldn't dilute the denominator"
   );
 
+  // --- multiTouchAttribution (real revenue splitting, not just presence) ---
+  const mtaWonAt = new Date("2026-03-20T00:00:00Z");
+  const mtaTps = [
+    fixtureTouchpoint({ identityId: "idA", channel: "ad_click", source: "google", occurredAt: new Date("2026-03-10T00:00:00Z") }), // 10 days before won
+    fixtureTouchpoint({ identityId: "idA", channel: "email_click", source: "mailchimp", occurredAt: new Date("2026-03-15T00:00:00Z") }), // 5 days before won
+    fixtureTouchpoint({ identityId: "idA", channel: "website_visit", source: "website", occurredAt: new Date("2026-03-18T00:00:00Z") }), // 2 days before won
+    fixtureTouchpoint({ identityId: "idA", channel: "pipedrive_stage_change", source: "pipedrive", occurredAt: mtaWonAt }), // on the day it won
+  ];
+  const mtaIdentity = fixtureIdentity({ id: "idA", email: "a@example.com", wonDealId: 950, dealValue: 1000, dealCurrency: "USD", dealWonAt: mtaWonAt });
+  const mtaSummary = buildPortalSummary([mtaIdentity], mtaTps);
+  const mta = mtaSummary.multiTouchAttribution;
+
+  function findRow(rows: typeof mta.linear, channel: string) {
+    return rows.find((r) => r.channel === channel);
+  }
+  const linearSum = mta.linear.reduce((sum, r) => sum + (r.creditedRevenue.USD ?? 0), 0);
+  assert(Math.round(linearSum) === 1000, "multiTouchAttribution.linear: credited revenue across all 4 channels sums to exactly the deal's value (1000), regardless of journey length");
+  assert(
+    Math.round((findRow(mta.linear, "Ad click")?.creditedRevenue.USD ?? 0)) === 250 &&
+      Math.round((findRow(mta.linear, "Deal stage")?.creditedRevenue.USD ?? 0)) === 250,
+    "multiTouchAttribution.linear: equal 1/4 credit (250) to every touchpoint regardless of position — first and last touch get the same as the middle ones"
+  );
+
+  const uShapedFirst = findRow(mta.uShaped, "Ad click")?.creditedRevenue.USD ?? 0;
+  const uShapedLast = findRow(mta.uShaped, "Deal stage")?.creditedRevenue.USD ?? 0;
+  const uShapedMiddle = findRow(mta.uShaped, "Email click")?.creditedRevenue.USD ?? 0;
+  assert(
+    Math.round(uShapedFirst) === 400 && Math.round(uShapedLast) === 400 && Math.round(uShapedMiddle) === 100,
+    "multiTouchAttribution.uShaped: first/last touch get 40% each (400), the 2 middle touches split the remaining 20% evenly (100 each)"
+  );
+
+  const timeDecayFirst = findRow(mta.timeDecay, "Ad click")?.creditedRevenue.USD ?? 0;
+  const timeDecayLast = findRow(mta.timeDecay, "Deal stage")?.creditedRevenue.USD ?? 0;
+  const timeDecaySum = mta.timeDecay.reduce((sum, r) => sum + (r.creditedRevenue.USD ?? 0), 0);
+  assert(
+    timeDecayLast > timeDecayFirst && Math.round(timeDecaySum) === 1000,
+    "multiTouchAttribution.timeDecay: the touchpoint closest to the win (Deal stage, day 0) gets MORE credit than the one furthest away (Ad click, 10 days prior), and the total still sums to exactly 1000"
+  );
+
+  const mtaNoValue = fixtureIdentity({ id: "idB", email: "b@example.com", wonDealId: 951, dealValue: null, dealCurrency: null });
+  const mtaNoValueTp = fixtureTouchpoint({ identityId: "idB", channel: "ad_click", source: "google", occurredAt: new Date("2026-03-10") });
+  const mtaNoValueSummary = buildPortalSummary([mtaNoValue], [mtaNoValueTp]);
+  assert(
+    mtaNoValueSummary.multiTouchAttribution.linear[0]?.creditedConversions === 1 &&
+      Object.keys(mtaNoValueSummary.multiTouchAttribution.linear[0]?.creditedRevenue ?? {}).length === 0,
+    "multiTouchAttribution: a Won deal with no captured value still contributes creditedConversions (1, the only touchpoint) but no revenue — no currency to attribute money in"
+  );
+
+  // --- notableChanges (week-over-week volume by source) -----------------
+  const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+  const repeatTps = (source: string, count: number, dayOffset: number) =>
+    Array.from({ length: count }, (_, i) =>
+      fixtureTouchpoint({ identityId: "idA", channel: "website_visit", source, occurredAt: daysAgo(dayOffset + i * 0.1) })
+    );
+  const notableTps = [
+    ...repeatTps("facebook", 10, 10), // last week: 10 touchpoints (well above the min baseline)
+    ...repeatTps("facebook", 4, 2), // this week: 4 — a real, sizeable (60%) drop
+    ...repeatTps("google", 5, 10), // last week: 5
+    ...repeatTps("google", 5, 2), // this week: 5 — flat, should NOT be flagged
+    ...repeatTps("tiktok", 2, 10), // last week: only 2 — below NOTABLE_CHANGE_MIN_BASELINE (3)
+    ...repeatTps("tiktok", 10, 2), // this week: 10 — a huge % jump, but shouldn't be flagged (baseline too small to trust)
+    ...repeatTps("bing", 10, 10), // last week: 10
+    ...repeatTps("bing", 8, 2), // this week: 8 — only a 20% drop, below the 30% threshold
+  ];
+  const notableIdentity = fixtureIdentity({ id: "idA", email: "a@example.com" });
+  const notableSummary = buildPortalSummary([notableIdentity], notableTps);
+  const facebookChange = notableSummary.notableChanges.find((c) => c.text.startsWith("facebook"));
+  assert(
+    !!facebookChange && facebookChange.direction === "decrease" && facebookChange.text.includes("60%"),
+    "notableChanges: facebook's real 60% week-over-week drop (10 → 4) is correctly flagged as a decrease"
+  );
+  assert(
+    !notableSummary.notableChanges.some((c) => c.text.startsWith("google")),
+    "notableChanges: google's flat volume (5 → 5, 0% change) is correctly NOT flagged"
+  );
+  assert(
+    !notableSummary.notableChanges.some((c) => c.text.startsWith("tiktok")),
+    "notableChanges: tiktok's huge-looking jump (2 → 10) is correctly NOT flagged — last week's baseline (2) is below the minimum sample size, so the % change isn't trustworthy"
+  );
+  assert(
+    !notableSummary.notableChanges.some((c) => c.text.startsWith("bing")),
+    "notableChanges: bing's real but modest 20% drop (10 → 8) is correctly NOT flagged — below the 30% notability threshold"
+  );
+
   // --- dealStageBySource ("where do leads get stuck?") -------------------
   const openDealIdentity = fixtureIdentity({
     id: "idA",
@@ -480,6 +564,22 @@ async function main() {
   assert(
     unfilteredSegmentSummary.recent.find((r) => r.identityId === "idA")?.segmentLabel === "Product A, Product B",
     "toRecentProspect: segmentLabel resolves EVERY id in a multi-select value and joins them, not just the first"
+  );
+
+  // --- channel filter (first-touch channel, e.g. "Ad click") ------------
+  const channelFilteredSummary = buildPortalSummary([idAConverted, idB, idC], tps, { channel: "Ad click" });
+  assert(
+    channelFilteredSummary.totalIdentities === 1 && channelFilteredSummary.recent[0]?.identityId === "idA",
+    "buildPortalSummary: filtering by channel 'Ad click' matches idA (first touch is ad_click) — idB's first touch is email_click, correctly excluded"
+  );
+  assert(
+    channelFilteredSummary.distinctUtmValues.channels.includes("Email click"),
+    "distinctUtmValues.channels: reflects the FULL unfiltered data, same convention as sources/segments above — includes idB's channel even though idB itself was filtered out"
+  );
+  const channelFilteredBySource = filterProspects([idAConverted, idB, idC], tps, { type: "funnel", value: "total" }, { channel: "Ad click", source: "linkedin_ads" });
+  assert(
+    channelFilteredBySource.length === 1 && channelFilteredBySource[0].identityId === "idA",
+    "filterProspects: channel composes with the other UTM fields (source here) — both must match, not either/or"
   );
 
   // --- CSV export (uncapped — unlike buildPortalSummary's top 25/10) ---

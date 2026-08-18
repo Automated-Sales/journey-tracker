@@ -303,95 +303,114 @@ function extractCustomFieldValue(data: any, key: string): unknown {
   return data?.[key];
 }
 
-async function applyLeadSourceFallback(tenant: Tenant, identity: Identity, data: any, occurredAt: Date): Promise<void> {
-  if (!tenant.leadSourceFieldKey) return;
+async function applyLeadSourceFallback(
+  tenant: Tenant,
+  identity: Identity,
+  data: any,
+  occurredAt: Date,
+  entity: "person" | "deal"
+): Promise<void> {
+  let allFields: { key: string; label: string; entity?: "person" | "deal"; options: { id: string; name: string }[] }[] = [];
+  try {
+    allFields = tenant.leadSourceFields ? JSON.parse(tenant.leadSourceFields) : [];
+  } catch {
+    allFields = [];
+  }
+  // Missing entity = a field saved before this was entity-aware, when
+  // the picker only ever offered Deal fields — defaults to "deal" for
+  // backward compatibility with already-configured tenants.
+  const fields = allFields.filter((f) => (f.entity || "deal") === entity);
+  if (!fields.length) return;
+
   const existingTouchpoints = await db.touchpoint.findMany({
     where: { tenantId: tenant.id, identityId: identity.id },
   });
-  // Excludes the generic pipedrive_lead_created/pipedrive_deal_created
-  // milestone markers (see webhooks.ts's lead/deal handlers) from
-  // counting as "real tracked data that should block this" — they're
-  // visibility markers, not genuine attribution signal, and treating
-  // them as a blocker meant the fallback could never fire on a LATER
-  // edit (e.g. the Lead Source field filled in after creation), since
-  // the marker itself — created on that same first webhook — would
-  // already look like "an existing touchpoint" by the time the edit
-  // arrived. Confirmed via debug-lead-source-field.ts + live pm2 logs:
-  // the edit webhook WAS arriving correctly, but this guard was
-  // silently declining every time because of exactly this.
-  const realTouchpoints = existingTouchpoints.filter(
-    (tp) => tp.channel !== "pipedrive_lead_created" && tp.channel !== "pipedrive_deal_created"
-  );
-  const rawValue = extractCustomFieldValue(data, tenant.leadSourceFieldKey);
-  // Temporary, deliberately verbose diagnostic — several rounds of fixes
-  // to this function still haven't produced a touchpoint in live
-  // testing despite the webhook confirmed arriving with no errors, so
-  // this makes every decision point visible in pm2 logs instead of
-  // guessing again. Safe to trim once this is confirmed working.
-  console.log(
-    `[lead-source-fallback] tenant=${tenant.id} identity=${identity.id} key="${tenant.leadSourceFieldKey}" rawValue=${JSON.stringify(
-      rawValue
-    )} existingTouchpoints=${existingTouchpoints.length} (channels: ${existingTouchpoints.map((t) => t.channel).join(", ") || "none"}) realTouchpoints=${realTouchpoints.length}`
-  );
-  if (realTouchpoints.length > 0) {
-    console.log(`[lead-source-fallback] BAILING — real (non-marker) touchpoints already exist`);
-    return;
+  // Channels excluded from counting as "real tracked data that should
+  // block this" — they say that SALES ENGAGEMENT happened, but nothing
+  // about WHERE the person originally came from, which is the specific
+  // question this feature exists to answer. Confirmed live: a lead
+  // worked entirely inside Pipedrive (a WhatsApp conversation logged as
+  // several Activities, zero real attribution data) was permanently
+  // blocked from ever getting a fallback source, even though it's
+  // exactly the kind of lead this feature is FOR — a channel our own
+  // tracking never saw, then worked entirely inside Pipedrive.
+  //   - pipedrive_lead_created / pipedrive_deal_created: generic
+  //     milestone markers (see the lead/deal handlers below) — see
+  //     their own history in this file for why they were added to this
+  //     list first.
+  //   - pipedrive_activity / pipedrive_note / pipedrive_stage_change:
+  //     genuine sales engagement, but not attribution signal — a
+  //     logged call or WhatsApp message doesn't say where the lead
+  //     came from any more than the lead simply existing does.
+  // lead_source_field itself deliberately STAYS a blocker — once the
+  // fallback has successfully set a source, a later edit picking up a
+  // lower-priority configured field shouldn't silently overwrite it.
+  const NON_BLOCKING_CHANNELS = new Set([
+    "pipedrive_lead_created",
+    "pipedrive_deal_created",
+    "pipedrive_activity",
+    "pipedrive_note",
+    "pipedrive_stage_change",
+  ]);
+  const realTouchpoints = existingTouchpoints.filter((tp) => !NON_BLOCKING_CHANNELS.has(tp.channel));
+  if (realTouchpoints.length > 0) return;
+
+  // Priority order — try each configured field in turn, first one with
+  // a genuine value on THIS payload wins. A single Pipedrive account
+  // can use different fields to record source depending on how a lead
+  // came in (confirmed live: Johari uses "Social Form Source" for
+  // web-form leads, a separate "Lead Source" field for
+  // WhatsApp-originated ones), so checking only one field always left
+  // some intake channel permanently uncovered.
+  for (const field of fields) {
+    const rawValue = extractCustomFieldValue(data, field.key);
+    if (rawValue === undefined || rawValue === null || rawValue === "") continue;
+    // Not every configured field is plain text — a single-select/enum
+    // field (e.g. "Lead Source") sends a raw option ID (often a
+    // number) on the webhook payload, not the display text; a
+    // multi-select field sends an array. Resolve each via this field's
+    // own cached options when present; otherwise treat the raw value as
+    // already-readable text.
+    const rawValues = Array.isArray(rawValue) ? rawValue : [rawValue];
+    const resolvedNames = rawValues
+      .map((v) => String(v).trim())
+      .filter(Boolean)
+      .map((v) => field.options.find((o) => o.id === v)?.name ?? v);
+    if (!resolvedNames.length) continue;
+    const resolved = resolvedNames.join(", ");
+    await db.touchpoint.create({
+      data: {
+        tenantId: tenant.id,
+        identityId: identity.id,
+        channel: "lead_source_field",
+        source: resolved,
+        title: `Lead source (${field.label}): ${resolved}`,
+        metadata: JSON.stringify({ leadSourceFieldKey: field.key, rawValue }),
+        // 1 second EARLIER than the passed-in occurredAt, not equal to
+        // it — this fallback and the pipedrive_lead_created/
+        // pipedrive_deal_created marker it's paired with are always
+        // given the SAME base timestamp (both derive from add_time,
+        // which doesn't change between a Lead's creation and a later
+        // edit), so without this offset, "first touch" ordering falls to
+        // an implicit tie-break (effectively insertion order) — and when
+        // this fires on a LATER edit (the marker having already been
+        // inserted days earlier), the marker wins the tie and this
+        // genuinely-more-informative touchpoint loses "first touch"
+        // status despite being the whole point of this feature. Nudging
+        // it 1 second earlier makes the ordering deterministic and
+        // correct regardless of insertion order.
+        occurredAt: new Date(occurredAt.getTime() - 1000),
+      },
+    });
+    // Immediate backfill, same "push now rather than wait for the next
+    // unrelated event" pattern used elsewhere in this file — this
+    // identity's Person-level AS: fields would otherwise stay blank
+    // until some later, unrelated webhook happens to re-trigger a sync.
+    await syncPersonAttribution(tenant, identity).catch((err) =>
+      console.error(`[webhooks] syncPersonAttribution after lead-source-fallback failed for tenant ${tenant.id}:`, err)
+    );
+    return; // first matching field wins — don't also apply a lower-priority one
   }
-  if (rawValue === undefined || rawValue === null || rawValue === "") {
-    console.log(`[lead-source-fallback] BAILING — rawValue is missing/empty on this webhook payload`);
-    return;
-  }
-  // Not every configured field is plain text — Johari's original
-  // "Social Form Source" was, but a single-select/enum field (e.g.
-  // "Lead Source") sends a raw option ID (often a number) on the
-  // webhook payload, not the display text; a multi-select field sends
-  // an array. Resolve each via the cached options map when one exists;
-  // otherwise fall back to treating the raw value as already-readable
-  // text, same as before this fix.
-  let options: { id: string; name: string }[] = [];
-  try {
-    options = tenant.leadSourceFieldOptions ? JSON.parse(tenant.leadSourceFieldOptions) : [];
-  } catch {
-    options = [];
-  }
-  const rawValues = Array.isArray(rawValue) ? rawValue : [rawValue];
-  const resolvedNames = rawValues
-    .map((v) => String(v).trim())
-    .filter(Boolean)
-    .map((v) => options.find((o) => o.id === v)?.name ?? v);
-  if (!resolvedNames.length) return;
-  const resolved = resolvedNames.join(", ");
-  await db.touchpoint.create({
-    data: {
-      tenantId: tenant.id,
-      identityId: identity.id,
-      channel: "lead_source_field",
-      source: resolved,
-      title: `Lead source (${tenant.leadSourceFieldLabel || "configured field"}): ${resolved}`,
-      metadata: JSON.stringify({ leadSourceFieldKey: tenant.leadSourceFieldKey, rawValue }),
-      // 1 second EARLIER than the passed-in occurredAt, not equal to
-      // it — this fallback and the pipedrive_lead_created/
-      // pipedrive_deal_created marker it's paired with are always
-      // given the SAME base timestamp (both derive from add_time,
-      // which doesn't change between a Lead's creation and a later
-      // edit), so without this offset, "first touch" ordering falls to
-      // an implicit tie-break (effectively insertion order) — and when
-      // this fires on a LATER edit (the marker having already been
-      // inserted days earlier), the marker wins the tie and this
-      // genuinely-more-informative touchpoint loses "first touch"
-      // status despite being the whole point of this feature. Nudging
-      // it 1 second earlier makes the ordering deterministic and
-      // correct regardless of insertion order.
-      occurredAt: new Date(occurredAt.getTime() - 1000),
-    },
-  });
-  // Immediate backfill, same "push now rather than wait for the next
-  // unrelated event" pattern used elsewhere in this file — this
-  // identity's Person-level AS: fields would otherwise stay blank
-  // until some later, unrelated webhook happens to re-trigger a sync.
-  await syncPersonAttribution(tenant, identity).catch((err) =>
-    console.error(`[webhooks] syncPersonAttribution after lead-source-fallback failed for tenant ${tenant.id}:`, err)
-  );
 }
 
 /**
@@ -514,6 +533,14 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
         // Deal/Lead, so this handler needs the same capture call the
         // deal/lead handlers already have.
         await captureSegmentValue(tenant, identity, data, "person");
+        // Same reasoning, now for the lead-source fallback too — a
+        // client's configured field(s) might live on Person, not just
+        // Deal/Lead (confirmed live: a Johari contact had its own
+        // Person-level "Lead Source" field, separate from the Lead-level
+        // one already in use). occurredAt uses "now" here, unlike the
+        // Lead/Deal call sites which use add_time — a person.change
+        // event doesn't carry an add_time of its own to fall back to.
+        await applyLeadSourceFallback(tenant, identity, data, new Date(), "person");
         // Backfill: this Person may already have anonymous touchpoints
         // (ad click, blog visits) recorded before Pipedrive knew who they
         // were. Push the summary now rather than waiting for the next
@@ -555,7 +582,7 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
         // (rather than the "created" branch's own createdAt) since this
         // now needs to run regardless of which branch below actually
         // fires.
-        await applyLeadSourceFallback(tenant, identity, data, data.add_time ? new Date(data.add_time) : new Date());
+        await applyLeadSourceFallback(tenant, identity, data, data.add_time ? new Date(data.add_time) : new Date(), "deal");
 
         // Only log a touchpoint when the stage genuinely changed — Pipedrive
         // fires a "deal updated" webhook for ANY field edit, including the
@@ -781,7 +808,7 @@ webhooksRouter.post("/webhooks/pipedrive", requireTenant, requireTenantSecret("s
         // that too would mean re-opening freezeLeadAttribution's
         // deliberately-permanent-once-set design; left alone for now as
         // a smaller, separate edge case.
-        await applyLeadSourceFallback(tenant, identity, data, data.add_time ? new Date(data.add_time) : new Date());
+        await applyLeadSourceFallback(tenant, identity, data, data.add_time ? new Date(data.add_time) : new Date(), "deal");
         if (!identity.leadCreatedAt) {
           const leadCreatedAt = data.add_time ? new Date(data.add_time) : new Date();
           // Unconditional milestone, created regardless of whether the
