@@ -14,7 +14,16 @@ export type Channel =
   // touchpoints, i.e. someone our own tracking never saw at all. See
   // webhooks.ts's "lead" handler and db.ts's Tenant interface doc
   // comment for the fuller reasoning.
-  | "lead_source_field";
+  | "lead_source_field"
+  // Unconditional milestone marker — unlike lead_source_field above,
+  // this fires every time a Lead is created for an identity, regardless
+  // of whether the fallback source field has a value. Gives visibility
+  // into the Lead stage of a contact's journey even when the fallback
+  // didn't apply (e.g. the field was left blank on that particular
+  // Lead) — see webhooks.ts's "lead" handler.
+  | "pipedrive_lead_created"
+  // Same idea, for Deals — see webhooks.ts's deal "created" handler.
+  | "pipedrive_deal_created";
 
 export interface RawTouchpoint {
   channel: Channel;

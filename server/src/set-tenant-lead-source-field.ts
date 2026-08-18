@@ -60,7 +60,7 @@ async function main() {
   }
 
   if (args.clear) {
-    await db.tenant.updateLeadSourceField(tenant.id, { leadSourceFieldKey: null, leadSourceFieldLabel: null });
+    await db.tenant.updateLeadSourceField(tenant.id, { leadSourceFieldKey: null, leadSourceFieldLabel: null, leadSourceFieldOptions: null });
     console.log(`Cleared the lead-source field mapping for "${tenant.name}" (${tenant.id}).`);
     return;
   }
@@ -93,7 +93,12 @@ async function main() {
     process.exit(1);
   }
 
-  await db.tenant.updateLeadSourceField(tenant.id, { leadSourceFieldKey: match.key, leadSourceFieldLabel: match.name });
+  const options = Array.isArray(match.options) ? match.options.map((o: any) => ({ id: String(o.id), name: String(o.label) })) : [];
+  await db.tenant.updateLeadSourceField(tenant.id, {
+    leadSourceFieldKey: match.key,
+    leadSourceFieldLabel: match.name,
+    leadSourceFieldOptions: options.length ? JSON.stringify(options) : null,
+  });
   console.log(
     `\nDone. "${tenant.name}" will now use "${match.name}" (field key ${match.key}) as the fallback first-touch source for any Lead whose contact has no other tracked touchpoints.`
   );

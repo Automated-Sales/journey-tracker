@@ -48,6 +48,15 @@ export async function getDeal(token: string, dealId: number) {
   return json.data;
 }
 
+// Leads use the v1 API and a UUID (not numeric) id — same convention
+// noted elsewhere in this file re: the Lead API's other quirks (flat
+// top-level custom-field properties, not the custom_fields wrapper
+// Person/Deal use for writes).
+export async function getLead(token: string, leadId: string) {
+  const json: any = await pdFetchV1(token, `/leads/${leadId}`);
+  return json.data;
+}
+
 export async function findPersonByEmail(token: string, email: string) {
   const json: any = await pdFetchV2(
     token,

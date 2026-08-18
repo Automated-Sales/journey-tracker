@@ -21,8 +21,16 @@ export const CHANNEL_LABELS: Record<string, string> = {
   social_organic: "Organic social",
   // See types.ts's Channel doc comment for this one — a per-tenant
   // configured Pipedrive field, used only as a last-resort fallback for
-  // a lead our own tracking never saw at all.
-  lead_source_field: "Lead form",
+  // a lead our own tracking never saw at all. Labeled "Lead source", not
+  // "Lead form" — the original use case (Johari's Social Form Source
+  // field) genuinely was a form submission, but this same mechanism now
+  // covers any configured field, which might just be a plain dropdown
+  // (e.g. "Referral", "Existing Customer") with no form involved at all.
+  lead_source_field: "Lead source",
+  // See types.ts's Channel doc comment — an unconditional "this became
+  // a Lead" marker, separate from lead_source_field above.
+  pipedrive_lead_created: "Lead created",
+  pipedrive_deal_created: "Deal created",
 };
 
 export interface AttributionSummary {

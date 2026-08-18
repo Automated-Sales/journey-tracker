@@ -357,7 +357,7 @@ portalRouter.post("/api/settings/lead-source-field", requireSession, requireActi
   const key = req.body?.key;
 
   if (!key) {
-    await db.tenant.updateLeadSourceField(tenant.id, { leadSourceFieldKey: null, leadSourceFieldLabel: null });
+    await db.tenant.updateLeadSourceField(tenant.id, { leadSourceFieldKey: null, leadSourceFieldLabel: null, leadSourceFieldOptions: null });
     return res.json({ ok: true, current: null });
   }
 
@@ -371,7 +371,18 @@ portalRouter.post("/api/settings/lead-source-field", requireSession, requireActi
     if (!match) {
       return res.status(400).json({ error: "That field no longer exists in Pipedrive — refresh the page and try again." });
     }
-    await db.tenant.updateLeadSourceField(tenant.id, { leadSourceFieldKey: match.key, leadSourceFieldLabel: match.name });
+    // Same lesson as the segment field: not every configured field is
+    // plain text (Johari's original "Social Form Source" was, but
+    // there's nothing stopping a client from picking a single-select
+    // field instead, whose webhook value is a raw option ID, not
+    // display text) — capture options here too so the fallback can
+    // resolve one if needed.
+    const options = Array.isArray(match.options) ? match.options.map((o: any) => ({ id: String(o.id), name: String(o.label) })) : [];
+    await db.tenant.updateLeadSourceField(tenant.id, {
+      leadSourceFieldKey: match.key,
+      leadSourceFieldLabel: match.name,
+      leadSourceFieldOptions: options.length ? JSON.stringify(options) : null,
+    });
     res.json({ ok: true, current: { key: match.key, name: match.name } });
   } catch (err: any) {
     console.error(`[settings] failed to save lead-source field for tenant ${tenant.id}:`, err);

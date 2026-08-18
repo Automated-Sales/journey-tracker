@@ -830,6 +830,41 @@ button.as-export-link {
   border-color: var(--as-green);
 }
 
+/* Top-level page navigation (dashboard.html's data-section groups) —
+   Reports / Setup & Segmentation / Ad Platform Exports. Deliberately
+   NOT a sidebar — a horizontal pill bar keeps this simple and works
+   identically on mobile without a separate collapse/hamburger state to
+   build and maintain. */
+.as-section-nav {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.as-section-nav-btn {
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--as-body);
+  background: #fff;
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-pill);
+  padding: 10px 20px;
+  cursor: pointer;
+}
+
+.as-section-nav-btn:hover {
+  border-color: var(--as-green);
+  color: var(--as-green-text);
+}
+
+.as-section-nav-btn.active {
+  color: #fff;
+  background: var(--as-ink);
+  border-color: var(--as-ink);
+}
+
 /* Conversion funnel's Value mode — two plain stat cards, not the
    proportional-bar layout Count mode uses (see renderFunnelValueMode's
    doc comment for why). */

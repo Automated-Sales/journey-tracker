@@ -217,6 +217,7 @@ async function init() {
   // own tracking never saw.
   ensureColumn("tenants", "leadSourceFieldKey", "TEXT");
   ensureColumn("tenants", "leadSourceFieldLabel", "TEXT");
+  ensureColumn("tenants", "leadSourceFieldOptions", "TEXT");
   ensureColumn("tenants", "segmentFieldKey", "TEXT");
   ensureColumn("tenants", "segmentFieldLabel", "TEXT");
   ensureColumn("tenants", "segmentFieldOptions", "TEXT");
@@ -291,6 +292,14 @@ export interface Tenant {
   // Social Form Source") — never used for matching/lookup.
   leadSourceFieldKey: string | null;
   leadSourceFieldLabel: string | null;
+  // Same "id -> readable name" resolution segmentFieldOptions already
+  // does — needed because the chosen field isn't always plain text
+  // (Johari's "Social Form Source" was, but a single-select/enum field
+  // like "Lead Source" sends a raw option ID on the webhook payload,
+  // not the display text). Null when the field genuinely IS plain text
+  // (no options to resolve — the raw captured value already IS the
+  // readable value in that case).
+  leadSourceFieldOptions: string | null;
   // A DIFFERENT per-tenant field mapping — generalizes Johari's specific
   // need (segmenting enquiries by Pipedrive Label, e.g. "which product
   // is this enquiry for") into something any tenant can configure for
@@ -504,6 +513,7 @@ function rowToTenant(row: any): Tenant | null {
     createdAt: new Date(row.createdAt),
     leadSourceFieldKey: row.leadSourceFieldKey ?? null,
     leadSourceFieldLabel: row.leadSourceFieldLabel ?? null,
+    leadSourceFieldOptions: row.leadSourceFieldOptions ?? null,
     segmentFieldKey: row.segmentFieldKey ?? null,
     segmentFieldLabel: row.segmentFieldLabel ?? null,
     segmentFieldOptions: row.segmentFieldOptions ?? null,
@@ -729,13 +739,17 @@ export const db = {
     // set-tenant-lead-source-field.ts (Stage 1); a future settings page
     // (Stage 2) will call this same method from an authenticated route
     // instead of a CLI script.
-    updateLeadSourceField(id: string, data: { leadSourceFieldKey: string | null; leadSourceFieldLabel: string | null }) {
+    updateLeadSourceField(
+      id: string,
+      data: { leadSourceFieldKey: string | null; leadSourceFieldLabel: string | null; leadSourceFieldOptions: string | null }
+    ) {
       return withDb(() => {
         const existing = queryOne("SELECT * FROM tenants WHERE id = ?", [id]);
         if (!existing) throw new Error(`Tenant ${id} not found`);
-        sqlite.run("UPDATE tenants SET leadSourceFieldKey = ?, leadSourceFieldLabel = ? WHERE id = ?", [
+        sqlite.run("UPDATE tenants SET leadSourceFieldKey = ?, leadSourceFieldLabel = ?, leadSourceFieldOptions = ? WHERE id = ?", [
           data.leadSourceFieldKey,
           data.leadSourceFieldLabel,
+          data.leadSourceFieldOptions,
           id,
         ]);
         persist();

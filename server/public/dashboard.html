@@ -41,6 +41,14 @@
          once the trial converts to 'active' or the tenant is 'exempt'. -->
     <div id="trial-banner" style="display:none;"></div>
 
+    <nav class="as-section-nav">
+      <button type="button" class="as-section-nav-btn active" data-nav-section="reports">Reports</button>
+      <button type="button" class="as-section-nav-btn" data-nav-section="setup">Setup &amp; Segmentation</button>
+      <button type="button" class="as-section-nav-btn" data-nav-section="ads">Ad Platform Exports</button>
+    </nav>
+
+    <div data-section="setup" style="display:none;">
+
     <div class="as-card as-install-card" id="install-card">
       <div class="as-install-head" id="install-toggle">
         <div>
@@ -152,6 +160,10 @@
       </div>
     </div>
 
+    </div>
+
+    <div data-section="ads" style="display:none;">
+
     <div class="as-card as-install-card" style="margin-bottom:28px;">
       <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Google Ads conversion feedback</h3>
       <p style="color:var(--as-body); font-size:13.5px; margin:0 0 16px;">
@@ -185,6 +197,10 @@
       <a class="as-btn as-btn-primary" href="/api/export/linkedin-ads-conversions.csv" download>Download conversions CSV</a>
     </div>
 
+    </div>
+
+    <div data-section="setup" style="display:none;">
+
     <div class="as-card as-install-card" style="margin-bottom:28px;">
       <h3 style="font-size:17px; font-weight:800; margin:0 0 4px;">Tracking social traffic</h3>
       <p style="color:var(--as-body); font-size:13.5px; margin:0 0 12px;">
@@ -194,6 +210,10 @@
         <strong>Organic social</strong> (someone clicks a link in a LinkedIn/Facebook/Instagram/X/TikTok post, with no ad or UTM involved) is detected automatically from the referring site and shown as its own "Organic social" channel — no setup needed. The one thing worth knowing: several platforms' in-app browsers (particularly Facebook, Instagram, and TikTok on mobile) strip the referrer for privacy, so a real organic-social click can occasionally show up as generic website traffic instead. For guaranteed accuracy — especially for a bio link or a post you'll want reliable numbers on — add UTM parameters to that link too (e.g. <code>?utm_source=linkedin&amp;utm_medium=social&amp;utm_campaign=launch-post</code>), the same as you would for an email link.
       </p>
     </div>
+
+    </div>
+
+    <div data-section="reports">
 
     <div class="as-stat-grid">
       <div class="as-stat-card">
@@ -310,6 +330,8 @@
       <div id="recent-columns-panel" class="as-columns-panel" style="display:none;"></div>
       <div id="recent-table"></div>
       <div id="recent-pagination" class="as-pagination"></div>
+    </div>
+
     </div>
 
   </div>
@@ -1726,6 +1748,31 @@
     await fetch('/api/logout', { method: 'POST', credentials: 'include' });
     window.location.href = '/';
   });
+
+  // Top-level page navigation (Reports / Setup & Segmentation / Ad
+  // Platform Exports) — every section's content is already fully
+  // rendered by load()/refreshReports() regardless of which one is
+  // currently visible, so switching is a pure CSS show/hide with
+  // nothing to re-fetch or re-render. Persisted per-browser so a
+  // returning visit lands back on whichever section was last open.
+  var SECTION_NAV_PREF_KEY = 'as_dashboard_section_v1';
+  function switchSection(section) {
+    document.querySelectorAll('[data-section]').forEach(function (el) {
+      el.style.display = el.getAttribute('data-section') === section ? '' : 'none';
+    });
+    document.querySelectorAll('.as-section-nav-btn').forEach(function (btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-nav-section') === section);
+    });
+    try { localStorage.setItem(SECTION_NAV_PREF_KEY, section); } catch (e) {}
+  }
+  document.querySelectorAll('.as-section-nav-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () { switchSection(btn.getAttribute('data-nav-section')); });
+  });
+  (function () {
+    var savedSection = null;
+    try { savedSection = localStorage.getItem(SECTION_NAV_PREF_KEY); } catch (e) {}
+    if (savedSection === 'reports' || savedSection === 'setup' || savedSection === 'ads') switchSection(savedSection);
+  })();
 
   document.getElementById('prospect-modal-close').addEventListener('click', closeProspectModal);
   prospectModalOverlay.addEventListener('click', function (event) {
